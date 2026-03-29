@@ -199,7 +199,7 @@ fn scan_command(
     // --- Run massdns ---
     eprintln!("Running massdns (hashmap-size={hashmap_size})...");
 
-    let massdns_status = Command::new("massdns")
+    let massdns_output = Command::new("massdns")
         .args([
             "-r",
             resolvers_file.to_str().unwrap(),
@@ -217,13 +217,20 @@ fn scan_command(
             results_file.to_str().unwrap(),
         ])
         .arg(&domains_file)
-        .status()
+        .output()
         .map_err(|err| AppError::io("failed to execute massdns", err))?;
 
-    if !massdns_status.success() {
+    if !massdns_output.status.success() {
+        let stderr = String::from_utf8_lossy(&massdns_output.stderr);
+        let stdout = String::from_utf8_lossy(&massdns_output.stdout);
+        eprintln!("massdns stderr: {stderr}");
+        eprintln!("massdns stdout: {stdout}");
         let _ = fs::remove_dir_all(&temp_dir);
-        return Err(AppError::new("massdns exited with non-zero status")
-            .with_help("ensure massdns is installed and available in PATH"));
+        return Err(AppError::new(format!(
+            "massdns exited with status {}",
+            massdns_output.status
+        ))
+        .with_help("check massdns output above for details"));
     }
 
     // --- Parse results ---
