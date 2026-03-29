@@ -1,0 +1,22 @@
+{
+  "name": "@domaingrep/linux-x64-gnu",
+  "version": "0.1.0",
+  "description": "Linux x64 glibc binary for domaingrep",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ysm-dev/domaingrep.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "domaingrep"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@domaingrep/linux-arm64-gnu",
+  "version": "0.1.0",
+  "description": "Linux ARM64 glibc binary for domaingrep",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ysm-dev/domaingrep.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "domaingrep"
+  ]
+}

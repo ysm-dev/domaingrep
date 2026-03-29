@@ -1,0 +1,76 @@
+name: Build Domain Cache
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-tlds:
+    runs-on: ubuntu-latest
+    outputs:
+      tld-groups: ${{ steps.fetch.outputs.groups }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build cache builder
+        run: cargo build --release --bin cache-builder
+      - name: fetch and filter TLDs
+        id: fetch
+        run: echo "groups=$(./target/release/cache-builder fetch-tlds | jq -c .)" >> "$GITHUB_OUTPUT"
+
+  scan:
+    needs: fetch-tlds
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        group: ${{ fromJSON(needs.fetch-tlds.outputs.tld-groups) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build cache builder
+        run: cargo build --release --bin cache-builder
+      - name: scan TLD group
+        run: ./target/release/cache-builder scan --tlds '${{ toJSON(matrix.group) }}'
+      - name: upload partial bitmap
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitmap-${{ strategy.job-index }}
+          path: partial-bitmap.bin
+
+  merge:
+    needs: scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build cache builder
+        run: cargo build --release --bin cache-builder
+      - name: download partial bitmaps
+        uses: actions/download-artifact@v4
+      - name: merge cache
+        run: ./target/release/cache-builder merge --output cache.bin
+      - name: compress cache
+        run: gzip -9 cache.bin
+      - name: generate checksum
+        run: sha256sum cache.bin.gz > cache.sha256
+      - name: recreate cache-latest tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete cache-latest --cleanup-tag -y || true
+          git tag -f cache-latest
+          git push origin refs/tags/cache-latest --force
+      - name: publish cache release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cache-latest
+          prerelease: true
+          files: |
+            cache.bin.gz
+            cache.sha256

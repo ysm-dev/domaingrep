@@ -1,0 +1,22 @@
+{
+  "name": "@domaingrep/linux-x64-musl",
+  "version": "0.1.0",
+  "description": "Linux x64 musl binary for domaingrep",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ysm-dev/domaingrep.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "musl"
+  ],
+  "files": [
+    "domaingrep"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@domaingrep/darwin-arm64",
+  "version": "0.1.0",
+  "description": "macOS Apple Silicon binary for domaingrep",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ysm-dev/domaingrep.git"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "domaingrep"
+  ]
+}

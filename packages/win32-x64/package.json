@@ -1,0 +1,19 @@
+{
+  "name": "@domaingrep/win32-x64",
+  "version": "0.1.0",
+  "description": "Windows x64 binary for domaingrep",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ysm-dev/domaingrep.git"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "domaingrep.exe"
+  ]
+}

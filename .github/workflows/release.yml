@@ -1,0 +1,189 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v*
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            binary_name: domaingrep
+            archive_ext: tar.gz
+            use_cross: false
+            publish_archive: true
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            binary_name: domaingrep
+            archive_ext: tar.gz
+            use_cross: false
+            publish_archive: true
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            binary_name: domaingrep
+            archive_ext: tar.gz
+            use_cross: true
+            publish_archive: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            binary_name: domaingrep
+            archive_ext: tar.gz
+            use_cross: true
+            publish_archive: true
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            binary_name: domaingrep
+            archive_ext: tar.gz
+            use_cross: false
+            publish_archive: true
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            binary_name: domaingrep
+            archive_ext: tar.gz
+            use_cross: true
+            publish_archive: false
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            binary_name: domaingrep.exe
+            archive_ext: zip
+            use_cross: false
+            publish_archive: true
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/install-action@cross
+        if: matrix.use_cross
+      - name: build binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target "${{ matrix.target }}" --bin domaingrep
+          else
+            cargo build --release --target "${{ matrix.target }}" --bin domaingrep
+          fi
+      - name: strip unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: strip "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" || true
+      - name: stage raw binary
+        shell: bash
+        run: |
+          mkdir -p "dist/raw/${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "dist/raw/${{ matrix.target }}/${{ matrix.binary_name }}"
+      - name: package unix archive
+        if: matrix.archive_ext == 'tar.gz' && matrix.publish_archive
+        shell: bash
+        run: |
+          mkdir -p dist/archives
+          tar -C "dist/raw/${{ matrix.target }}" -czf "dist/archives/domaingrep-${{ matrix.target }}.tar.gz" "${{ matrix.binary_name }}"
+      - name: package windows archive
+        if: matrix.archive_ext == 'zip' && matrix.publish_archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/archives | Out-Null
+          Compress-Archive -Path "dist/raw/${{ matrix.target }}/${{ matrix.binary_name }}" -DestinationPath "dist/archives/domaingrep-${{ matrix.target }}.zip" -Force
+      - name: upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: dist/
+
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: render install script
+        run: sh ./scripts/release/render_install_sh.sh "${GITHUB_REF_NAME#v}" dist/install.sh
+      - name: create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/archives/*.tar.gz
+            artifacts/**/archives/*.zip
+            dist/install.sh
+
+  publish-crate:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
+
+  publish-npm:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: prepare npm packages
+        run: node ./scripts/release/prepare_npm_packages.mjs "${GITHUB_REF_NAME#v}" "$PWD/artifacts" "$PWD/staging/npm"
+      - name: publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for dir in staging/npm/packages/*; do
+            (cd "$dir" && npm publish --access public)
+          done
+      - name: publish wrapper package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd staging/npm/domaingrep
+          npm publish --access public
+
+  update-homebrew:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: clone tap repository
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: gh repo clone ysm-dev/homebrew-tap staging/homebrew-tap
+      - name: render formula
+        shell: bash
+        run: |
+          export DARWIN_ARM64_SHA256="$(shasum -a 256 artifacts/build-aarch64-apple-darwin/archives/domaingrep-aarch64-apple-darwin.tar.gz | awk '{print $1}')"
+          export DARWIN_X64_SHA256="$(shasum -a 256 artifacts/build-x86_64-apple-darwin/archives/domaingrep-x86_64-apple-darwin.tar.gz | awk '{print $1}')"
+          export LINUX_ARM64_SHA256="$(shasum -a 256 artifacts/build-aarch64-unknown-linux-musl/archives/domaingrep-aarch64-unknown-linux-musl.tar.gz | awk '{print $1}')"
+          export LINUX_X64_SHA256="$(shasum -a 256 artifacts/build-x86_64-unknown-linux-gnu/archives/domaingrep-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')"
+          sh ./scripts/release/render_homebrew_formula.sh "${GITHUB_REF_NAME#v}" "$PWD/staging/homebrew-tap/Formula/domaingrep.rb"
+      - name: commit and push formula update
+        working-directory: staging/homebrew-tap
+        env:
+          GIT_AUTHOR_NAME: domaingrep release
+          GIT_AUTHOR_EMAIL: actions@users.noreply.github.com
+          GIT_COMMITTER_NAME: domaingrep release
+          GIT_COMMITTER_EMAIL: actions@users.noreply.github.com
+        run: |
+          git add Formula/domaingrep.rb
+          git commit -m "update domaingrep ${GITHUB_REF_NAME}" || exit 0
+          git push origin HEAD
