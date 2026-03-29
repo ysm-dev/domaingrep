@@ -1,8 +1,7 @@
 use clap::{Parser, Subcommand};
 use domaingrep::cache::{all_short_domains, CacheFile};
 use domaingrep::dns::{
-    build_http_client_with_timeouts, DnsResolver, DEFAULT_FALLBACK_DOH_URL,
-    DEFAULT_PRIMARY_DOH_URL,
+    build_http_client_with_timeouts, DnsResolver, DEFAULT_FALLBACK_DOH_URL, DEFAULT_PRIMARY_DOH_URL,
 };
 use domaingrep::error::AppError;
 use domaingrep::tld::{fetch_filtered_tlds, sort_tlds, split_groups, DEFAULT_TLD_SOURCE_URL};
