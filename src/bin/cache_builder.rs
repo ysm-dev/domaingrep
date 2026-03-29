@@ -40,7 +40,7 @@ enum Commands {
         #[arg(long, default_value = "partial-bitmap.bin")]
         output: PathBuf,
 
-        #[arg(long, default_value_t = 100)]
+        #[arg(long, default_value_t = 200)]
         concurrency: usize,
 
         #[arg(long, default_value = DEFAULT_PRIMARY_DOH_URL)]
@@ -126,26 +126,38 @@ async fn scan_command(
     let domains = all_short_domains();
     let mut cache = CacheFile::empty(tlds.clone(), now_unix_seconds());
 
-    for (tld_index, tld) in tlds.iter().enumerate() {
-        let requests = stream::iter(domains.iter().map(|domain| {
-            let resolver = resolver.clone();
-            let tld = tld.clone();
-            let domain = domain.clone();
-            async move {
-                let full_domain = format!("{domain}.{tld}");
-                let available = scan_domain(&resolver, &full_domain).await;
-                (domain, available)
-            }
-        }))
-        .buffer_unordered(concurrency.max(1));
+    // Pre-compute domain indices once to avoid repeated string parsing
+    let domain_indices: Vec<u32> = domains
+        .iter()
+        .map(|d| domaingrep::cache::domain_to_index(d).expect("all_short_domains are valid"))
+        .collect();
 
-        tokio::pin!(requests);
-        while let Some((domain, available)) = requests.next().await {
-            if available {
-                cache.set_available_by_index(tld_index, &domain, true)?;
-            }
+    // Flatten all (tld, domain) pairs into a single stream for maximum
+    // concurrency utilisation -- no idle gaps between TLD boundaries.
+    let all_queries = tlds.iter().enumerate().flat_map(|(tld_index, tld)| {
+        domains
+            .iter()
+            .enumerate()
+            .map(move |(domain_pos, domain)| (tld_index, domain_pos, tld.clone(), domain.clone()))
+    });
+
+    let results = stream::iter(all_queries.map(|(tld_index, domain_pos, tld, domain)| {
+        let resolver = resolver.clone();
+        async move {
+            let full_domain = format!("{domain}.{tld}");
+            let available = scan_domain(&resolver, &full_domain).await;
+            (tld_index, domain_pos, available)
+        }
+    }))
+    .buffer_unordered(concurrency.max(1));
+
+    tokio::pin!(results);
+    while let Some((tld_index, domain_pos, available)) = results.next().await {
+        if available {
+            cache.set_available_raw(tld_index, domain_indices[domain_pos] as usize, true)?;
         }
     }
+    cache.finalize_checksum();
 
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
