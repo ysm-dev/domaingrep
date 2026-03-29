@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use domaingrep::cache::{all_short_domains, CacheFile, DOMAINS_PER_TLD};
+use domaingrep::cache::{all_short_domains, CacheFile};
 use domaingrep::dns::{
     build_http_client, DnsResolver, DEFAULT_FALLBACK_DOH_URL, DEFAULT_PRIMARY_DOH_URL,
 };
@@ -199,15 +199,11 @@ fn merge_command(output: PathBuf, input_dir: PathBuf) -> Result<(), AppError> {
                 continue;
             };
 
-            for domain_index in 0..DOMAINS_PER_TLD {
-                if partial.is_available_raw(src_index, domain_index) {
-                    merged.set_available_raw(dst_index, domain_index, true)?;
-                }
-            }
-
+            merged.copy_tld_bitmap(dst_index, partial.bitmap(), src_index)?;
             break;
         }
     }
+    merged.finalize_checksum();
 
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)

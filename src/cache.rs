@@ -240,8 +240,50 @@ impl CacheFile {
         let bit_position = tld_index * DOMAINS_PER_TLD + domain_index;
         let bitmap = self.bitmap.as_mut_slice()?;
         set_bit(bitmap, bit_position, available);
-        self.header.checksum = sha256_bytes(bitmap);
         Ok(())
+    }
+
+    /// Copy a full TLD's bitmap slice from a source byte slice.
+    /// Both src and dst must have the same DOMAINS_PER_TLD layout.
+    pub fn copy_tld_bitmap(
+        &mut self,
+        dst_tld_index: usize,
+        src_bitmap: &[u8],
+        src_tld_index: usize,
+    ) -> Result<(), AppError> {
+        if dst_tld_index >= self.header.tlds.len() {
+            return Err(AppError::new("destination TLD index out of bounds"));
+        }
+
+        let bits = DOMAINS_PER_TLD;
+        let src_bit_start = src_tld_index * bits;
+        let dst_bit_start = dst_tld_index * bits;
+
+        // Fast path: copy aligned full bytes, then handle the trailing partial byte
+        let full_bytes = bits / 8;
+        let trailing_bits = bits % 8;
+
+        let src_byte_start = src_bit_start / 8;
+        let dst_byte_start = dst_bit_start / 8;
+
+        let bitmap = self.bitmap.as_mut_slice()?;
+        bitmap[dst_byte_start..dst_byte_start + full_bytes]
+            .copy_from_slice(&src_bitmap[src_byte_start..src_byte_start + full_bytes]);
+
+        if trailing_bits > 0 {
+            let mask = !0u8 << (8 - trailing_bits);
+            let src_byte = src_bitmap[src_byte_start + full_bytes];
+            let dst = &mut bitmap[dst_byte_start + full_bytes];
+            *dst = (src_byte & mask) | (*dst & !mask);
+        }
+
+        Ok(())
+    }
+
+    /// Recompute the header checksum from the current bitmap contents.
+    /// Call this once after all bulk mutations are complete.
+    pub fn finalize_checksum(&mut self) {
+        self.header.checksum = sha256_bytes(self.bitmap.as_slice());
     }
 
     pub fn lookup_by_index(&self, tld_index: usize, domain: &str) -> Result<bool, AppError> {
