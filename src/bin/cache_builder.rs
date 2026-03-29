@@ -5,11 +5,31 @@ use domaingrep::dns::{
 };
 use domaingrep::error::AppError;
 use domaingrep::tld::{fetch_filtered_tlds, sort_tlds, split_groups, DEFAULT_TLD_SOURCE_URL};
-use futures::{stream, StreamExt};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const DEFAULT_RESOLVERS: &str = "\
+8.8.8.8
+8.8.4.4
+1.1.1.1
+1.0.0.1
+9.9.9.9
+149.112.112.112
+208.67.222.222
+208.67.220.220
+4.2.2.1
+4.2.2.2
+64.6.64.6
+64.6.65.6
+77.88.8.8
+77.88.8.1
+94.140.14.14
+94.140.15.15
+";
 
 #[derive(Debug, Parser)]
 #[command(name = "cache-builder", about = "Build the domaingrep bitmap cache")]
@@ -46,20 +66,13 @@ enum Commands {
         #[arg(long, default_value = "partial-bitmap.bin")]
         output: PathBuf,
 
-        #[arg(long, default_value_t = 200)]
-        concurrency: usize,
+        /// massdns concurrent lookups (hashmap size)
+        #[arg(long, default_value_t = 10000)]
+        hashmap_size: usize,
 
-        #[arg(long, default_value = DEFAULT_PRIMARY_DOH_URL)]
-        primary_url: String,
-
-        #[arg(long, default_value = DEFAULT_FALLBACK_DOH_URL)]
-        fallback_url: String,
-
-        #[arg(long, default_value_t = 5)]
-        connect_timeout: u64,
-
-        #[arg(long, default_value_t = 10)]
-        request_timeout: u64,
+        /// Path to a custom resolvers file (one IP per line)
+        #[arg(long)]
+        resolvers: Option<PathBuf>,
     },
     Merge {
         #[arg(long)]
@@ -112,84 +125,160 @@ async fn run(cli: CacheBuilderCli) -> Result<(), AppError> {
         Commands::Scan {
             tlds,
             output,
-            concurrency,
-            primary_url,
-            fallback_url,
-            connect_timeout,
-            request_timeout,
-        } => {
-            scan_command(
-                &tlds,
-                output,
-                concurrency,
-                &primary_url,
-                &fallback_url,
-                Duration::from_secs(connect_timeout),
-                Duration::from_secs(request_timeout),
-            )
-            .await
-        }
+            hashmap_size,
+            resolvers,
+        } => scan_command(&tlds, output, hashmap_size, resolvers),
         Commands::Merge { output, input_dir } => merge_command(output, input_dir),
     }
 }
 
-async fn scan_command(
+fn scan_command(
     tlds_input: &str,
     output: PathBuf,
-    concurrency: usize,
-    primary_url: &str,
-    fallback_url: &str,
-    connect_timeout: Duration,
-    request_timeout: Duration,
+    hashmap_size: usize,
+    resolvers_path: Option<PathBuf>,
 ) -> Result<(), AppError> {
     let mut tlds = parse_tlds(tlds_input)?;
     sort_tlds(&mut tlds);
 
-    let client = build_http_client_with_timeouts(
-        primary_url.starts_with("https://") && fallback_url.starts_with("https://"),
-        connect_timeout,
-        request_timeout,
-    )?;
-    let resolver = DnsResolver::with_concurrency(
-        client,
-        primary_url.to_string(),
-        fallback_url.to_string(),
-        concurrency,
-    );
     let domains = all_short_domains();
     let mut cache = CacheFile::empty(tlds.clone(), now_unix_seconds());
 
-    // Pre-compute domain indices once to avoid repeated string parsing
     let domain_indices: Vec<u32> = domains
         .iter()
         .map(|d| domaingrep::cache::domain_to_index(d).expect("all_short_domains are valid"))
         .collect();
 
-    // Flatten all (tld, domain) pairs into a single stream for maximum
-    // concurrency utilisation -- no idle gaps between TLD boundaries.
-    let all_queries = tlds.iter().enumerate().flat_map(|(tld_index, tld)| {
-        domains
-            .iter()
-            .enumerate()
-            .map(move |(domain_pos, domain)| (tld_index, domain_pos, tld.clone(), domain.clone()))
-    });
+    let domain_pos_map: HashMap<&str, usize> = domains
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.as_str(), i))
+        .collect();
 
-    let results = stream::iter(all_queries.map(|(tld_index, domain_pos, tld, domain)| {
-        let resolver = resolver.clone();
-        async move {
-            let full_domain = format!("{domain}.{tld}");
-            let available = scan_domain(&resolver, &full_domain).await;
-            (tld_index, domain_pos, available)
-        }
-    }))
-    .buffer_unordered(concurrency.max(1));
+    let tld_pos_map: HashMap<&str, usize> = tlds
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.as_str(), i))
+        .collect();
 
-    tokio::pin!(results);
-    while let Some((tld_index, domain_pos, available)) = results.next().await {
-        if available {
-            cache.set_available_raw(tld_index, domain_indices[domain_pos] as usize, true)?;
+    // --- Prepare temp files for massdns ---
+    let temp_dir = std::env::temp_dir().join(format!("cache-builder-{}", std::process::id()));
+    fs::create_dir_all(&temp_dir)
+        .map_err(|err| AppError::io("failed to create temp directory", err))?;
+
+    let domains_file = temp_dir.join("domains.txt");
+    let resolvers_file = temp_dir.join("resolvers.txt");
+    let results_file = temp_dir.join("results.jsonl");
+
+    let total_queries = tlds.len() * domains.len();
+    eprintln!(
+        "Generating {total_queries} queries ({} TLDs × {} domains)...",
+        tlds.len(),
+        domains.len()
+    );
+
+    {
+        let mut f = fs::File::create(&domains_file)
+            .map_err(|err| AppError::io("failed to create domains file", err))?;
+        for tld in &tlds {
+            for domain in &domains {
+                writeln!(f, "{domain}.{tld}")
+                    .map_err(|err| AppError::io("failed to write domain", err))?;
+            }
         }
     }
+
+    let resolvers_content = match &resolvers_path {
+        Some(path) => fs::read_to_string(path)
+            .map_err(|err| AppError::io(format!("failed to read {}", path.display()), err))?,
+        None => DEFAULT_RESOLVERS.to_string(),
+    };
+    fs::write(&resolvers_file, &resolvers_content)
+        .map_err(|err| AppError::io("failed to write resolvers file", err))?;
+
+    // --- Run massdns ---
+    eprintln!("Running massdns (hashmap-size={hashmap_size})...");
+
+    let massdns_status = Command::new("massdns")
+        .args([
+            "-r",
+            resolvers_file.to_str().unwrap(),
+            "-t",
+            "A",
+            "-o",
+            "J",
+            "-s",
+            &hashmap_size.to_string(),
+            "--retry",
+            "2",
+            "--lifetime",
+            "5",
+            "-w",
+            results_file.to_str().unwrap(),
+        ])
+        .arg(&domains_file)
+        .status()
+        .map_err(|err| AppError::io("failed to execute massdns", err))?;
+
+    if !massdns_status.success() {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(AppError::new("massdns exited with non-zero status")
+            .with_help("ensure massdns is installed and available in PATH"));
+    }
+
+    // --- Parse results ---
+    eprintln!("Parsing massdns results...");
+
+    let reader = BufReader::new(
+        fs::File::open(&results_file)
+            .map_err(|err| AppError::io("failed to open massdns results", err))?,
+    );
+
+    let mut available_count = 0usize;
+    for line in reader.lines() {
+        let line = line.map_err(|err| AppError::io("failed to read result line", err))?;
+        if line.is_empty() {
+            continue;
+        }
+
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let status = match v.get("status").and_then(|s| s.as_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        if status != "NXDOMAIN" {
+            continue;
+        }
+
+        let name = match v.get("name").and_then(|n| n.as_str()) {
+            Some(n) => n.trim_end_matches('.'),
+            None => continue,
+        };
+
+        // Split into domain and tld (all TLDs in the system are single-label)
+        let Some(dot_pos) = name.find('.') else {
+            continue;
+        };
+        let domain_part = &name[..dot_pos];
+        let tld_part = &name[dot_pos + 1..];
+
+        if let (Some(&tld_idx), Some(&domain_pos)) =
+            (tld_pos_map.get(tld_part), domain_pos_map.get(domain_part))
+        {
+            cache.set_available_raw(tld_idx, domain_indices[domain_pos] as usize, true)?;
+            available_count += 1;
+        }
+    }
+
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    eprintln!("Found {available_count} available domains out of {total_queries} queries");
+
     cache.finalize_checksum();
 
     if let Some(parent) = output.parent() {
@@ -199,16 +288,6 @@ async fn scan_command(
 
     fs::write(&output, cache.to_bytes())
         .map_err(|err| AppError::io(format!("failed to write {}", output.display()), err))
-}
-
-async fn scan_domain(resolver: &DnsResolver, domain: &str) -> bool {
-    for _ in 0..2 {
-        match resolver.check_availability(domain).await {
-            Ok(available) => return available,
-            Err(_) => continue,
-        }
-    }
-    false
 }
 
 fn merge_command(output: PathBuf, input_dir: PathBuf) -> Result<(), AppError> {

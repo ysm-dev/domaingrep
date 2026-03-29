@@ -21,11 +21,17 @@ jobs:
           key: cache-builder
       - name: build cache builder
         run: cargo build --profile ci --bin cache-builder
-      - name: upload cache-builder binary
+      - name: build massdns
+        run: |
+          git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns
+          make -C /tmp/massdns
+      - name: upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: cache-builder-bin
-          path: target/ci/cache-builder
+          name: binaries
+          path: |
+            target/ci/cache-builder
+            /tmp/massdns/bin/massdns
       - name: fetch and filter TLDs
         id: fetch
         run: echo "groups=$(./target/ci/cache-builder fetch-tlds | jq -c .)" >> "$GITHUB_OUTPUT"
@@ -41,9 +47,12 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: cache-builder-bin
+          name: binaries
       - name: scan TLD group
-        run: chmod +x cache-builder && ./cache-builder scan --tlds '${{ toJSON(matrix.group) }}' --connect-timeout 3 --request-timeout 5
+        run: |
+          chmod +x cache-builder massdns
+          export PATH="$PWD:$PATH"
+          ./cache-builder scan --tlds '${{ toJSON(matrix.group) }}'
       - name: upload partial bitmap
         uses: actions/upload-artifact@v4
         with:
@@ -57,7 +66,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: cache-builder-bin
+          name: binaries
       - name: download partial bitmaps
         uses: actions/download-artifact@v4
       - name: merge cache
