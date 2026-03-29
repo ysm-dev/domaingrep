@@ -209,8 +209,6 @@ fn scan_command(
             "J",
             "-s",
             &hashmap_size.to_string(),
-            "--lifetime",
-            "5",
             "-w",
             results_file.to_str().unwrap(),
         ])
