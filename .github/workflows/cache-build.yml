@@ -25,13 +25,16 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/blechschmidt/massdns.git /tmp/massdns
           make -C /tmp/massdns
+      - name: stage binaries
+        run: |
+          mkdir -p staging
+          cp target/ci/cache-builder staging/
+          cp /tmp/massdns/bin/massdns staging/
       - name: upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: binaries
-          path: |
-            target/ci/cache-builder
-            /tmp/massdns/bin/massdns
+          path: staging/
       - name: fetch and filter TLDs
         id: fetch
         run: echo "groups=$(./target/ci/cache-builder fetch-tlds | jq -c .)" >> "$GITHUB_OUTPUT"
