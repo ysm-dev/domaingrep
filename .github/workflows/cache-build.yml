@@ -16,27 +16,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cache-builder
       - name: build cache builder
-        run: cargo build --release --bin cache-builder
+        run: cargo build --profile ci --bin cache-builder
+      - name: upload cache-builder binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: cache-builder-bin
+          path: target/ci/cache-builder
       - name: fetch and filter TLDs
         id: fetch
-        run: echo "groups=$(./target/release/cache-builder fetch-tlds | jq -c .)" >> "$GITHUB_OUTPUT"
+        run: echo "groups=$(./target/ci/cache-builder fetch-tlds | jq -c .)" >> "$GITHUB_OUTPUT"
 
   scan:
     needs: fetch-tlds
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 12
+      max-parallel: 20
       matrix:
         group: ${{ fromJSON(needs.fetch-tlds.outputs.tld-groups) }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: build cache builder
-        run: cargo build --release --bin cache-builder
+      - uses: actions/download-artifact@v4
+        with:
+          name: cache-builder-bin
       - name: scan TLD group
-        run: ./target/release/cache-builder scan --tlds '${{ toJSON(matrix.group) }}'
+        run: chmod +x cache-builder && ./cache-builder scan --tlds '${{ toJSON(matrix.group) }}' --concurrency 500 --connect-timeout 3 --request-timeout 5
       - name: upload partial bitmap
         uses: actions/upload-artifact@v4
         with:
@@ -48,13 +55,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: build cache builder
-        run: cargo build --release --bin cache-builder
+      - uses: actions/download-artifact@v4
+        with:
+          name: cache-builder-bin
       - name: download partial bitmaps
         uses: actions/download-artifact@v4
       - name: merge cache
-        run: ./target/release/cache-builder merge --output cache.bin
+        run: chmod +x cache-builder && ./cache-builder merge --output cache.bin
       - name: compress cache
         run: gzip -9 cache.bin
       - name: generate checksum

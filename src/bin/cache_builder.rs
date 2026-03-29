@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
 use domaingrep::cache::{all_short_domains, CacheFile};
 use domaingrep::dns::{
-    build_http_client, DnsResolver, DEFAULT_FALLBACK_DOH_URL, DEFAULT_PRIMARY_DOH_URL,
+    build_http_client_with_timeouts, DnsResolver, DEFAULT_FALLBACK_DOH_URL,
+    DEFAULT_PRIMARY_DOH_URL,
 };
 use domaingrep::error::AppError;
 use domaingrep::tld::{fetch_filtered_tlds, sort_tlds, split_groups, DEFAULT_TLD_SOURCE_URL};
@@ -9,7 +10,7 @@ use futures::{stream, StreamExt};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Parser)]
 #[command(name = "cache-builder", about = "Build the domaingrep bitmap cache")]
@@ -32,6 +33,12 @@ enum Commands {
 
         #[arg(long, default_value = DEFAULT_FALLBACK_DOH_URL)]
         fallback_url: String,
+
+        #[arg(long, default_value_t = 5)]
+        connect_timeout: u64,
+
+        #[arg(long, default_value_t = 10)]
+        request_timeout: u64,
     },
     Scan {
         #[arg(long)]
@@ -48,6 +55,12 @@ enum Commands {
 
         #[arg(long, default_value = DEFAULT_FALLBACK_DOH_URL)]
         fallback_url: String,
+
+        #[arg(long, default_value_t = 5)]
+        connect_timeout: u64,
+
+        #[arg(long, default_value_t = 10)]
+        request_timeout: u64,
     },
     Merge {
         #[arg(long)]
@@ -79,9 +92,13 @@ async fn run(cli: CacheBuilderCli) -> Result<(), AppError> {
             source_url,
             primary_url,
             fallback_url,
+            connect_timeout,
+            request_timeout,
         } => {
-            let client = build_http_client(
+            let client = build_http_client_with_timeouts(
                 primary_url.starts_with("https://") && fallback_url.starts_with("https://"),
+                Duration::from_secs(connect_timeout),
+                Duration::from_secs(request_timeout),
             )?;
             let resolver = DnsResolver::new(client.clone(), primary_url, fallback_url);
             let groups = split_groups(
@@ -99,7 +116,20 @@ async fn run(cli: CacheBuilderCli) -> Result<(), AppError> {
             concurrency,
             primary_url,
             fallback_url,
-        } => scan_command(&tlds, output, concurrency, &primary_url, &fallback_url).await,
+            connect_timeout,
+            request_timeout,
+        } => {
+            scan_command(
+                &tlds,
+                output,
+                concurrency,
+                &primary_url,
+                &fallback_url,
+                Duration::from_secs(connect_timeout),
+                Duration::from_secs(request_timeout),
+            )
+            .await
+        }
         Commands::Merge { output, input_dir } => merge_command(output, input_dir),
     }
 }
@@ -110,12 +140,16 @@ async fn scan_command(
     concurrency: usize,
     primary_url: &str,
     fallback_url: &str,
+    connect_timeout: Duration,
+    request_timeout: Duration,
 ) -> Result<(), AppError> {
     let mut tlds = parse_tlds(tlds_input)?;
     sort_tlds(&mut tlds);
 
-    let client = build_http_client(
+    let client = build_http_client_with_timeouts(
         primary_url.starts_with("https://") && fallback_url.starts_with("https://"),
+        connect_timeout,
+        request_timeout,
     )?;
     let resolver = DnsResolver::with_concurrency(
         client,
@@ -169,7 +203,7 @@ async fn scan_command(
 }
 
 async fn scan_domain(resolver: &DnsResolver, domain: &str) -> bool {
-    for _ in 0..3 {
+    for _ in 0..2 {
         match resolver.check_availability(domain).await {
             Ok(available) => return available,
             Err(_) => continue,
