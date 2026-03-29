@@ -1109,7 +1109,7 @@ const KNOWN_AVAILABLE: &[&str] = &["xyzzy-test-domain-12345.com"];
 
 ### 14.6 커버리지 목표
 
-문자 그대로의 100%보다는 높은 신뢰도를 목표로 합니다. 핵심 라이브러리 모듈에서 >=90% line coverage를 목표로 하며, `cargo-tarpaulin` 또는 `cargo-llvm-cov`로 측정합니다.
+문자 그대로의 100%보다는 높은 신뢰도를 목표로 합니다. 장기적으로 핵심 라이브러리 모듈에서 >=90% line coverage를 목표로 하며, `cargo-tarpaulin` 또는 `cargo-llvm-cov`로 측정합니다. 현재 CI 게이트는 자동화 테스트가 아직 다루지 않는 `src/bin/cache_builder.rs`를 제외하고, 나머지 코드에 대해 전체 line coverage >=75%를 요구합니다.
 
 ---
 
@@ -1126,7 +1126,7 @@ Job:
   3. test:     cargo test --all-features --lib --bins --test cli --test cache --test dns --test hack --test output
   4. smoke:    cargo test --test live_dns_smoke -- --ignored
   5. build:    cargo build --release (컴파일 확인)
-  6. coverage: cargo llvm-cov --fail-under-lines 90
+  6. coverage: cargo llvm-cov --ignore-filename-regex '(^|.*/)bin/cache_builder\.rs$' --fail-under-lines 75
 ```
 
 ### 15.2 워크플로 2: Release

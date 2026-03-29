@@ -43,7 +43,7 @@ jobs:
         with:
           name: cache-builder-bin
       - name: scan TLD group
-        run: chmod +x cache-builder && ./cache-builder scan --tlds '${{ toJSON(matrix.group) }}' --concurrency 500 --connect-timeout 3 --request-timeout 5
+        run: chmod +x cache-builder && ./cache-builder scan --tlds '${{ toJSON(matrix.group) }}' --connect-timeout 3 --request-timeout 5
       - name: upload partial bitmap
         uses: actions/upload-artifact@v4
         with:

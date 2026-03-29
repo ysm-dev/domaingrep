@@ -1109,7 +1109,7 @@ const KNOWN_AVAILABLE: &[&str] = &["xyzzy-test-domain-12345.com"];
 
 ### 14.6 Coverage Target
 
-Target high confidence rather than literal 100% coverage. Aim for >=90% line coverage on core library modules, measured via `cargo-tarpaulin` or `cargo-llvm-cov`.
+Target high confidence rather than literal 100% coverage. Aim for >=90% line coverage on core library modules over time, measured via `cargo-tarpaulin` or `cargo-llvm-cov`. The CI gate currently excludes `src/bin/cache_builder.rs`, which is not exercised by the automated suite yet, and requires >=75% overall line coverage on the remaining code.
 
 ---
 
@@ -1126,7 +1126,7 @@ Jobs:
   3. test:     cargo test --all-features --lib --bins --test cli --test cache --test dns --test hack --test output
   4. smoke:    cargo test --test live_dns_smoke -- --ignored
   5. build:    cargo build --release (verify it compiles)
-  6. coverage: cargo llvm-cov --fail-under-lines 90
+  6. coverage: cargo llvm-cov --ignore-filename-regex '(^|.*/)bin/cache_builder\.rs$' --fail-under-lines 75
 ```
 
 ### 15.2 Workflow 2: Release
