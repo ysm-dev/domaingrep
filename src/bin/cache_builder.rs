@@ -209,8 +209,6 @@ fn scan_command(
             "J",
             "-s",
             &hashmap_size.to_string(),
-            "--retry",
-            "REFUSED,SERVFAIL",
             "--lifetime",
             "5",
             "-w",
