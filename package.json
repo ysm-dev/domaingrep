@@ -1,0 +1,12 @@
+{
+  "name": "domaingrep",
+  "version": "0.0.1",
+  "description": "Bulk domain availability checker CLI",
+  "keywords": ["domain", "availability", "bulk", "check", "tld", "whois", "dns", "cli"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ysm-dev/domaingrep"
+  },
+  "license": "MIT",
+  "author": "chrisy"
+}
