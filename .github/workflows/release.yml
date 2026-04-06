@@ -131,7 +131,6 @@ jobs:
 
   publish-npm:
     needs: build
-    if: ${{ vars.ENABLE_NPM_PUBLISH == 'true' }}
     runs-on: ubuntu-latest
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
