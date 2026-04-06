@@ -1,5 +1,5 @@
 {
-  "name": "@domaingrep/linux-arm64-musl",
+  "name": "domaingrep-linux-arm64-musl",
   "version": "0.2.0",
   "description": "Linux ARM64 musl binary for domaingrep",
   "license": "MIT",

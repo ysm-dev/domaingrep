@@ -1,5 +1,5 @@
 {
-  "name": "@domaingrep/win32-x64",
+  "name": "domaingrep-win32-x64",
   "version": "0.2.0",
   "description": "Windows x64 binary for domaingrep",
   "license": "MIT",

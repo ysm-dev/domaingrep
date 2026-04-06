@@ -1,5 +1,5 @@
 {
-  "name": "@domaingrep/darwin-x64",
+  "name": "domaingrep-darwin-x64",
   "version": "0.2.0",
   "description": "macOS Intel binary for domaingrep",
   "license": "MIT",

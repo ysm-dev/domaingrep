@@ -20,10 +20,10 @@ function detectLinuxLibc() {
 function resolvePackageName() {
   if (process.platform === "darwin") {
     if (process.arch === "arm64") {
-      return "@domaingrep/darwin-arm64";
+      return "domaingrep-darwin-arm64";
     }
     if (process.arch === "x64") {
-      return "@domaingrep/darwin-x64";
+      return "domaingrep-darwin-x64";
     }
   }
 
@@ -31,18 +31,18 @@ function resolvePackageName() {
     const libc = detectLinuxLibc();
     if (process.arch === "arm64") {
       return libc === "gnu"
-        ? "@domaingrep/linux-arm64-gnu"
-        : "@domaingrep/linux-arm64-musl";
+        ? "domaingrep-linux-arm64-gnu"
+        : "domaingrep-linux-arm64-musl";
     }
     if (process.arch === "x64") {
       return libc === "gnu"
-        ? "@domaingrep/linux-x64-gnu"
-        : "@domaingrep/linux-x64-musl";
+        ? "domaingrep-linux-x64-gnu"
+        : "domaingrep-linux-x64-musl";
     }
   }
 
   if (process.platform === "win32" && process.arch === "x64") {
-    return "@domaingrep/win32-x64";
+    return "domaingrep-win32-x64";
   }
 
   return null;
