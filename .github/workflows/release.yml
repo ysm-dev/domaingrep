@@ -133,6 +133,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     env:
+      ENABLE_NPM_PUBLISH: ${{ vars.ENABLE_NPM_PUBLISH }}
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -142,6 +143,10 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: publish wrapper package
         run: |
+          if [ "${ENABLE_NPM_PUBLISH:-false}" != "true" ]; then
+            echo "Skipping npm wrapper publish: ENABLE_NPM_PUBLISH is not true"
+            exit 0
+          fi
           if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
             echo "Skipping npm wrapper publish: NPM_TOKEN is not configured"
             exit 0
