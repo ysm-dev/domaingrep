@@ -2,7 +2,7 @@
 
 > Bulk domain availability search CLI tool.
 
-**Version:** 0.2.1
+**Version:** 0.2.2
 **Last Updated:** 2026-04-06
 
 ---
@@ -311,11 +311,21 @@ Any timeout or inconclusive result excludes the TLD.
 
 ### 6.4 Sorting
 
-Regular results are sorted by:
+For mode A inputs (`domaingrep abc`), regular results are ordered in two tiers:
 
-1. TLD length ascending
-2. Hardcoded popularity order
-3. Alphabetical order
+1. Available pinned TLDs first, ignoring TLD length
+2. Remaining results sorted by:
+   a. TLD length ascending
+   b. Hardcoded popularity order
+   c. Alphabetical order
+
+Pinned TLDs are ordered as:
+
+`com`, `net`, `org`, `xyz`, `co`, `io`, `app`, `ai`, `me`, `dev`, `cc`, `tv`, `sh`, `is`, `so`, `to`, `im`, `ly`, `fm`, `am`, `tech`, `site`, `shop`, `blog`
+
+Unavailable pinned TLDs are not promoted. They remain in the normal order below the promoted group.
+
+For mode B inputs (`domaingrep abc.sh`), regular results keep the normal sort order without pinned promotion.
 
 ### 6.5 `--tld-len`
 
@@ -504,7 +514,8 @@ Fields:
 ### 9.3 Ordering
 
 1. All hack results first
-2. Then regular results sorted by TLD length, popularity, alphabetically
+2. Then, for mode A inputs only, available pinned regular results ordered by the pinned TLD list
+3. Then remaining regular results sorted by TLD length, popularity, alphabetically
 
 ### 9.4 `--limit`
 

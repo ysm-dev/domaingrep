@@ -147,7 +147,11 @@ pub async fn run(cli: Cli, runtime: RuntimeConfig) -> Result<RunReport, AppError
     }
 
     let summary = resolve_regular(&input.sld, &regular_tlds, &cache, &resolve_config).await?;
-    all_results.extend(summary.results);
+    if input.mode == InputMode::SldOnly {
+        all_results.extend(promote_available_pinned_results(summary.results));
+    } else {
+        all_results.extend(summary.results);
+    }
 
     let available_count = all_results.iter().filter(|result| result.available).count();
     let visible_count = all_results
@@ -299,6 +303,26 @@ async fn resolve_regular(
     Ok(ResolutionSummary { results })
 }
 
+fn promote_available_pinned_results(results: Vec<DomainResult>) -> Vec<DomainResult> {
+    let (mut pinned, rest): (Vec<_>, Vec<_>) = results
+        .into_iter()
+        .partition(|result| result.available && tld::is_pinned(result_tld(&result.domain)));
+
+    pinned.sort_by_key(|result| {
+        tld::pinned_index(result_tld(&result.domain))
+            .expect("pinned result should have a pinned TLD")
+    });
+
+    pinned.into_iter().chain(rest).collect()
+}
+
+fn result_tld(domain: &str) -> &str {
+    domain
+        .rsplit_once('.')
+        .map(|(_, tld)| tld)
+        .unwrap_or(domain)
+}
+
 fn effective_output_limit(
     limit: Option<usize>,
     json: bool,
@@ -345,7 +369,19 @@ fn parse_env_u8(name: &str, default: u8) -> Result<u8, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_output_limit, DEFAULT_TERMINAL_LIMIT};
+    use super::{
+        effective_output_limit, promote_available_pinned_results, CheckMethod, DomainResult,
+        ResultKind, DEFAULT_TERMINAL_LIMIT,
+    };
+
+    fn regular_result(domain: &str, available: bool) -> DomainResult {
+        DomainResult {
+            domain: domain.to_string(),
+            available,
+            kind: ResultKind::Regular,
+            method: CheckMethod::Cache,
+        }
+    }
 
     #[test]
     fn explicit_limit_zero_disables_truncation() {
@@ -360,5 +396,41 @@ mod tests {
         );
         assert_eq!(effective_output_limit(None, false, false), None);
         assert_eq!(effective_output_limit(None, true, true), None);
+    }
+
+    #[test]
+    fn promotes_available_pinned_regular_results() {
+        let results = vec![
+            regular_result("abc.io", true),
+            regular_result("abc.me", true),
+            regular_result("abc.com", true),
+            regular_result("abc.dev", true),
+            regular_result("abc.art", true),
+        ];
+
+        let domains = promote_available_pinned_results(results)
+            .into_iter()
+            .map(|result| result.domain)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            domains,
+            vec!["abc.com", "abc.io", "abc.me", "abc.dev", "abc.art"]
+        );
+    }
+
+    #[test]
+    fn leaves_unavailable_pinned_regular_results_in_rest_order() {
+        let results = vec![
+            regular_result("abc.io", false),
+            regular_result("abc.dev", true),
+        ];
+
+        let domains = promote_available_pinned_results(results)
+            .into_iter()
+            .map(|result| result.domain)
+            .collect::<Vec<_>>();
+
+        assert_eq!(domains, vec!["abc.dev", "abc.io"]);
     }
 }

@@ -115,6 +115,16 @@ fn popularity_index(tld: &str) -> Option<usize> {
         .position(|entry| *entry == tld)
 }
 
+pub fn pinned_index(tld: &str) -> Option<usize> {
+    tld_popularity::PINNED_TLDS
+        .iter()
+        .position(|entry| *entry == tld)
+}
+
+pub fn is_pinned(tld: &str) -> bool {
+    pinned_index(tld).is_some()
+}
+
 pub fn split_groups(tlds: &[String], group_size: usize) -> Vec<Vec<String>> {
     let size = group_size.max(1);
     tlds.chunks(size).map(|chunk| chunk.to_vec()).collect()
@@ -222,7 +232,7 @@ async fn resolve_raw_async(
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_tlds, TldLenRange};
+    use super::{filter_tlds, is_pinned, pinned_index, TldLenRange};
 
     #[test]
     fn parses_supported_length_ranges() {
@@ -266,5 +276,13 @@ mod tests {
 
         let filtered = filter_tlds(&tlds, None, None);
         assert_eq!(filtered, vec!["ai", "co", "com", "app", "xyz", "shop"]);
+    }
+
+    #[test]
+    fn reports_pinned_tlds() {
+        assert_eq!(pinned_index("com"), Some(0));
+        assert_eq!(pinned_index("dev"), Some(9));
+        assert!(is_pinned("shop"));
+        assert!(!is_pinned("info"));
     }
 }

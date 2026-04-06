@@ -130,7 +130,7 @@ jobs:
         run: cargo publish
 
   publish-npm:
-    needs: build
+    needs: create-release
     runs-on: ubuntu-latest
     permissions:
       id-token: write

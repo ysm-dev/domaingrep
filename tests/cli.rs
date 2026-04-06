@@ -61,6 +61,59 @@ fn domain_hacks_appear_before_regular_results() {
 }
 
 #[test]
+fn available_pinned_regular_results_appear_first() {
+    let temp = tempdir().unwrap();
+    let cache_dir = temp.path().join("cache");
+    write_local_cache(
+        &cache_dir,
+        &["io", "me", "com", "dev", "art"],
+        &[
+            ("abc", "io"),
+            ("abc", "me"),
+            ("abc", "com"),
+            ("abc", "dev"),
+            ("abc", "art"),
+        ],
+    );
+
+    let mut command = Command::cargo_bin("domaingrep").unwrap();
+    command
+        .arg("abc")
+        .arg("--color")
+        .arg("never")
+        .env("DOMAINGREP_CACHE_DIR", &cache_dir)
+        .env("DOMAINGREP_DISABLE_UPDATE", "1");
+
+    command
+        .assert()
+        .success()
+        .stdout("abc.com\nabc.io\nabc.me\nabc.dev\nabc.art\n")
+        .stderr("");
+}
+
+#[test]
+fn all_output_only_promotes_available_pinned_results() {
+    let temp = tempdir().unwrap();
+    let cache_dir = temp.path().join("cache");
+    write_local_cache(&cache_dir, &["io", "dev"], &[("abc", "dev")]);
+
+    let mut command = Command::cargo_bin("domaingrep").unwrap();
+    command
+        .arg("abc")
+        .arg("--all")
+        .arg("--color")
+        .arg("never")
+        .env("DOMAINGREP_CACHE_DIR", &cache_dir)
+        .env("DOMAINGREP_DISABLE_UPDATE", "1");
+
+    command
+        .assert()
+        .success()
+        .stdout("  abc.dev\nx abc.io\n")
+        .stderr("");
+}
+
+#[test]
 fn prefix_mode_disables_hack_detection() {
     let temp = tempdir().unwrap();
     let cache_dir = temp.path().join("cache");
