@@ -119,6 +119,7 @@ jobs:
 
   publish-crate:
     needs: create-release
+    if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -130,6 +131,7 @@ jobs:
 
   publish-npm:
     needs: build
+    if: ${{ secrets.NPM_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -158,6 +160,7 @@ jobs:
 
   update-homebrew:
     needs: create-release
+    if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
