@@ -119,20 +119,21 @@ jobs:
 
   publish-crate:
     needs: create-release
-    if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
     runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: publish crate
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
         run: cargo publish
 
   publish-npm:
     needs: build
-    if: ${{ secrets.NPM_TOKEN != '' }}
     runs-on: ubuntu-latest
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -145,33 +146,32 @@ jobs:
       - name: prepare npm packages
         run: node ./scripts/release/prepare_npm_packages.mjs "${GITHUB_REF_NAME#v}" "$PWD/artifacts" "$PWD/staging/npm"
       - name: publish platform packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        if: ${{ env.NODE_AUTH_TOKEN != '' }}
         run: |
           for dir in staging/npm/packages/*; do
             (cd "$dir" && npm publish --access public)
           done
       - name: publish wrapper package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        if: ${{ env.NODE_AUTH_TOKEN != '' }}
         run: |
           cd staging/npm/domaingrep
           npm publish --access public
 
   update-homebrew:
     needs: create-release
-    if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
       - name: clone tap repository
-        env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        if: ${{ env.GH_TOKEN != '' }}
         run: gh repo clone ysm-dev/homebrew-tap staging/homebrew-tap
       - name: render formula
+        if: ${{ env.GH_TOKEN != '' }}
         shell: bash
         run: |
           export DARWIN_ARM64_SHA256="$(shasum -a 256 artifacts/build-aarch64-apple-darwin/archives/domaingrep-aarch64-apple-darwin.tar.gz | awk '{print $1}')"
@@ -180,6 +180,7 @@ jobs:
           export LINUX_X64_SHA256="$(shasum -a 256 artifacts/build-x86_64-unknown-linux-gnu/archives/domaingrep-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')"
           sh ./scripts/release/render_homebrew_formula.sh "${GITHUB_REF_NAME#v}" "$PWD/staging/homebrew-tap/Formula/domaingrep.rb"
       - name: commit and push formula update
+        if: ${{ env.GH_TOKEN != '' }}
         working-directory: staging/homebrew-tap
         env:
           GIT_AUTHOR_NAME: domaingrep release
