@@ -600,8 +600,10 @@ fn replace_file(tmp_path: &Path, path: &Path) -> Result<(), AppError> {
 }
 
 #[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
+#[cfg(windows)]
 fn replace_file(tmp_path: &Path, path: &Path) -> Result<(), AppError> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
 
     if !path.exists() {
