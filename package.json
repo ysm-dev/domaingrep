@@ -16,14 +16,5 @@
   ],
   "engines": {
     "node": ">=18"
-  },
-  "optionalDependencies": {
-    "domaingrep-darwin-arm64": "0.2.0",
-    "domaingrep-darwin-x64": "0.2.0",
-    "domaingrep-linux-arm64-gnu": "0.2.0",
-    "domaingrep-linux-arm64-musl": "0.2.0",
-    "domaingrep-linux-x64-gnu": "0.2.0",
-    "domaingrep-linux-x64-musl": "0.2.0",
-    "domaingrep-win32-x64": "0.2.0"
   }
 }

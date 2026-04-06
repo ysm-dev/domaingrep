@@ -140,27 +140,12 @@ jobs:
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - name: prepare npm packages
-        run: node ./scripts/release/prepare_npm_packages.mjs "${GITHUB_REF_NAME#v}" "$PWD/artifacts" "$PWD/staging/npm"
-      - name: publish platform packages
-        run: |
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "Skipping npm platform publish: NPM_TOKEN is not configured"
-            exit 0
-          fi
-          for dir in staging/npm/packages/*; do
-            (cd "$dir" && npm publish --access public)
-          done
       - name: publish wrapper package
         run: |
           if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
             echo "Skipping npm wrapper publish: NPM_TOKEN is not configured"
             exit 0
           fi
-          cd staging/npm/domaingrep
           npm publish --access public
 
   update-homebrew:
