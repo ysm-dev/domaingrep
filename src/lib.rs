@@ -15,6 +15,7 @@ use error::AppError;
 use hack::HackTrie;
 use http::build_http_client;
 use input::{parse, InputMode};
+use is_terminal::IsTerminal;
 use output::{visible_results, CheckMethod, DomainResult, OutputOptions, ResultKind};
 use resolve::{parse_resolver_list, resolve_domains, ResolveConfig};
 use std::env;
@@ -32,6 +33,7 @@ pub const DEFAULT_CACHE_ASSET_URL: &str =
     "https://github.com/ysm-dev/domaingrep/releases/download/cache-latest/cache.bin.gz";
 pub const DEFAULT_CACHE_CHECKSUM_URL: &str =
     "https://github.com/ysm-dev/domaingrep/releases/download/cache-latest/cache.sha256";
+const DEFAULT_TERMINAL_LIMIT: usize = 25;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
@@ -92,10 +94,6 @@ impl RuntimeConfig {
 }
 
 pub async fn run(cli: Cli, runtime: RuntimeConfig) -> Result<RunReport, AppError> {
-    if matches!(cli.limit, Some(0)) {
-        return Err(AppError::limit_must_be_at_least_one());
-    }
-
     let raw_domain = cli.domain.clone().ok_or_else(AppError::no_domain)?;
     let input = parse(&raw_domain)?;
     let tld_range = cli.tld_len.as_deref().map(TldLenRange::parse).transpose()?;
@@ -152,7 +150,13 @@ pub async fn run(cli: Cli, runtime: RuntimeConfig) -> Result<RunReport, AppError
     all_results.extend(summary.results);
 
     let available_count = all_results.iter().filter(|result| result.available).count();
-    let limited_results = visible_results(&all_results, cli.all, cli.limit);
+    let visible_count = all_results
+        .iter()
+        .filter(|result| cli.all || result.available)
+        .count();
+    let effective_limit =
+        effective_output_limit(cli.limit, cli.json, std::io::stdout().is_terminal());
+    let limited_results = visible_results(&all_results, cli.all, effective_limit);
     let stdout = output::render(
         &limited_results,
         OutputOptions {
@@ -167,6 +171,15 @@ pub async fn run(cli: Cli, runtime: RuntimeConfig) -> Result<RunReport, AppError
         stderr.push(format!(
             "note: no available domains found for '{}'",
             input.normalized
+        ));
+    }
+
+    if !cli.json && limited_results.len() < visible_count {
+        stderr.push(format!(
+            "note: {} more domains not shown (showing {} of {}; use --limit 0 to show all)",
+            visible_count - limited_results.len(),
+            limited_results.len(),
+            visible_count
         ));
     }
 
@@ -286,6 +299,20 @@ async fn resolve_regular(
     Ok(ResolutionSummary { results })
 }
 
+fn effective_output_limit(
+    limit: Option<usize>,
+    json: bool,
+    stdout_is_terminal: bool,
+) -> Option<usize> {
+    match limit {
+        Some(0) => None,
+        Some(limit) => Some(limit),
+        None if json => None,
+        None if stdout_is_terminal => Some(DEFAULT_TERMINAL_LIMIT),
+        None => None,
+    }
+}
+
 fn parse_env_usize(name: &str, default: usize) -> Result<usize, AppError> {
     match env::var(name) {
         Ok(value) => value.parse::<usize>().map_err(|_| {
@@ -313,5 +340,25 @@ fn parse_env_u8(name: &str, default: u8) -> Result<u8, AppError> {
                 .with_help("use a positive integer between 1 and 255")
         }),
         Err(_) => Ok(default),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{effective_output_limit, DEFAULT_TERMINAL_LIMIT};
+
+    #[test]
+    fn explicit_limit_zero_disables_truncation() {
+        assert_eq!(effective_output_limit(Some(0), false, true), None);
+    }
+
+    #[test]
+    fn default_limit_only_applies_to_plain_terminal_output() {
+        assert_eq!(
+            effective_output_limit(None, false, true),
+            Some(DEFAULT_TERMINAL_LIMIT)
+        );
+        assert_eq!(effective_output_limit(None, false, false), None);
+        assert_eq!(effective_output_limit(None, true, true), None);
     }
 }

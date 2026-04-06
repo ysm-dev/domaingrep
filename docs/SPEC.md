@@ -2,7 +2,7 @@
 
 > Bulk domain availability search CLI tool.
 
-**Version:** 0.2.0
+**Version:** 0.2.1
 **Last Updated:** 2026-04-06
 
 ---
@@ -152,7 +152,7 @@ domaingrep [OPTIONS] <DOMAIN>
 | `--all` | `-a` | `false` | Show unavailable results too |
 | `--json` | `-j` | `false` | Emit NDJSON |
 | `--tld-len <RANGE>` | `-t` | all | Filter TLDs by length: `2`, `2..5`, `..3`, `4..` |
-| `--limit <N>` | `-l` | none | Maximum rows emitted after filtering |
+| `--limit <N>` | `-l` | `25` on terminal, none otherwise | Maximum rows emitted after filtering. `0` means unlimited. |
 | `--color <WHEN>` | | `auto` | `auto`, `always`, `never` |
 | `--help` | `-h` | | Show help |
 | `--version` | `-V` | | Show version |
@@ -244,9 +244,8 @@ error: invalid character '@' in domain 'ab@c'
 ```
 
 ```text
-error: --limit must be at least 1
-  --> '--limit 0'
-  = help: use a positive integer such as '--limit 10'
+error: invalid --tld-len range 'x'
+  = help: use '2', '2..5', '..3', or '4..'
 ```
 
 ---
@@ -513,6 +512,9 @@ Fields:
 
 - without `--all`: after dropping unavailable results
 - with `--all`: after including both available and unavailable results
+- `--limit 0` disables truncation
+- when stdout is a terminal, plain text output defaults to `25` rows if `--limit` is omitted
+- when stdout is not a terminal, or when `--json` is used, omitted `--limit` means unlimited
 
 All DNS work is still performed before truncation.
 
@@ -521,6 +523,7 @@ All DNS work is still performed before truncation.
 Current stderr notes:
 
 - `note: no available domains found for '{input}'`
+- `note: {remaining} more domains not shown (showing {shown} of {total}; use --limit 0 to show all)` when plain text output is truncated
 - update notice, if background update check finishes before process exit
 
 The implementation does not emit a partial-DNS-failure note.
@@ -702,7 +705,6 @@ The release workflow builds release binaries for the configured target matrix, p
 | Scenario | Exit |
 |---|---|
 | invalid input | `2` |
-| `--limit 0` | `2` |
 | cache bootstrap/download failure | `2` |
 | cache checksum mismatch | `2` |
 | resolver misconfiguration | `2` |

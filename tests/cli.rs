@@ -199,21 +199,49 @@ fn help_shows_required_domain() {
 }
 
 #[test]
-fn limit_zero_uses_structured_error_format() {
+fn explicit_limit_emits_truncation_note() {
     let temp = tempdir().unwrap();
     let cache_dir = temp.path().join("cache");
-    write_local_cache(&cache_dir, &["io"], &[]);
+    write_local_cache(&cache_dir, &["io", "dev"], &[("abc", "io"), ("abc", "dev")]);
+
+    let mut command = Command::cargo_bin("domaingrep").unwrap();
+    command
+        .arg("--limit")
+        .arg("1")
+        .arg("abc")
+        .arg("--color")
+        .arg("never")
+        .env("DOMAINGREP_CACHE_DIR", &cache_dir)
+        .env("DOMAINGREP_DISABLE_UPDATE", "1");
+
+    command
+        .assert()
+        .success()
+        .stdout("abc.io\n")
+        .stderr(predicate::str::contains(
+            "note: 1 more domains not shown (showing 1 of 2; use --limit 0 to show all)",
+        ));
+}
+
+#[test]
+fn limit_zero_shows_all_results() {
+    let temp = tempdir().unwrap();
+    let cache_dir = temp.path().join("cache");
+    write_local_cache(&cache_dir, &["io", "dev"], &[("abc", "io"), ("abc", "dev")]);
 
     let mut command = Command::cargo_bin("domaingrep").unwrap();
     command
         .arg("--limit")
         .arg("0")
         .arg("abc")
+        .arg("--color")
+        .arg("never")
         .env("DOMAINGREP_CACHE_DIR", &cache_dir)
         .env("DOMAINGREP_DISABLE_UPDATE", "1");
 
-    command.assert().code(2).stdout("").stderr(
-        predicate::str::contains("error: --limit must be at least 1")
-            .and(predicate::str::contains("--> '--limit 0'")),
-    );
+    command
+        .assert()
+        .success()
+        .stdout("abc.io\nabc.dev\n")
+        .stderr("");
 }

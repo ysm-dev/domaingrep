@@ -32,7 +32,7 @@ pub struct Cli {
         long,
         short = 'l',
         value_name = "N",
-        help = "Maximum rows to emit after filtering"
+        help = "Maximum rows to emit after filtering; default 25 in terminal, 0 shows all"
     )]
     pub limit: Option<usize>,
 

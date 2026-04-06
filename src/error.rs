@@ -53,12 +53,6 @@ impl AppError {
             .with_help("pass a single domain label like 'abc'")
     }
 
-    pub fn limit_must_be_at_least_one() -> Self {
-        Self::new("--limit must be at least 1")
-            .with_where("'--limit 0'")
-            .with_help("use a positive integer such as '--limit 10'")
-    }
-
     pub fn invalid_tld_len(input: &str) -> Self {
         Self::new(format!("invalid --tld-len range '{input}'"))
             .with_help("use '2', '2..5', '..3', or '4..'")
