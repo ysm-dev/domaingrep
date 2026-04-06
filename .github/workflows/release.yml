@@ -136,13 +136,15 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
           registry-url: https://registry.npmjs.org
       - name: publish wrapper package
-        run: npm publish --access public
+        run: |
+          unset NODE_AUTH_TOKEN
+          npm publish --provenance --access public
 
   update-homebrew:
     needs: create-release
