@@ -1,28 +1,19 @@
-use domaingrep::dns::{build_http_client, DnsResolver};
+use domaingrep::resolve::{resolve_domains, ResolveConfig};
 
-#[tokio::test]
+#[test]
 #[ignore]
-async fn known_registered_domain_is_unavailable() {
-    let resolver = DnsResolver::new(
-        build_http_client(true).unwrap(),
-        "https://cloudflare-dns.com/dns-query",
-        "https://dns.google/resolve",
-    );
-
-    assert!(!resolver.check_availability("google.com").await.unwrap());
+fn known_registered_domain_is_unavailable() {
+    let results = resolve_domains(&ResolveConfig::default(), &["google.com".to_string()]).unwrap();
+    assert_eq!(results, vec![false]);
 }
 
-#[tokio::test]
+#[test]
 #[ignore]
-async fn unlikely_domain_is_available() {
-    let resolver = DnsResolver::new(
-        build_http_client(true).unwrap(),
-        "https://cloudflare-dns.com/dns-query",
-        "https://dns.google/resolve",
-    );
-
-    assert!(resolver
-        .check_availability("xyzzy-test-domain-12345.com")
-        .await
-        .unwrap());
+fn unlikely_domain_is_available() {
+    let results = resolve_domains(
+        &ResolveConfig::default(),
+        &["xyzzy-test-domain-12345.com".to_string()],
+    )
+    .unwrap();
+    assert_eq!(results, vec![true]);
 }

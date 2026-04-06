@@ -2,8 +2,8 @@
 
 > Bulk domain availability search CLI tool.
 
-**Version:** 0.1.0
-**Last Updated:** 2026-03-29
+**Version:** 0.2.0
+**Last Updated:** 2026-04-06
 
 ---
 
@@ -12,113 +12,122 @@
 1. [Overview](#1-overview)
 2. [Architecture](#2-architecture)
 3. [CLI Interface](#3-cli-interface)
-4. [Input Parsing & Validation](#4-input-parsing--validation)
+4. [Input Parsing and Validation](#4-input-parsing-and-validation)
 5. [Domain Hack Detection](#5-domain-hack-detection)
 6. [TLD Management](#6-tld-management)
 7. [Cache System (1-3 Character Domains)](#7-cache-system-1-3-character-domains)
-8. [Live DNS Resolution (4+ Character Domains)](#8-live-dns-resolution-4-character-domains)
+8. [UDP DNS Resolution (4+ Character Domains)](#8-udp-dns-resolution-4-character-domains)
 9. [Output Format](#9-output-format)
 10. [Auto-Update](#10-auto-update)
-11. [Cache Builder (GitHub Actions)](#11-cache-builder-github-actions)
-12. [Distribution & Installation](#12-distribution--installation)
+11. [Cache Builder and GitHub Actions](#11-cache-builder-and-github-actions)
+12. [Distribution and Installation](#12-distribution-and-installation)
 13. [Project Structure](#13-project-structure)
 14. [Testing Strategy](#14-testing-strategy)
 15. [CI/CD Pipeline](#15-cicd-pipeline)
 16. [Error Handling](#16-error-handling)
-17. [Performance Targets](#17-performance-targets)
+17. [Performance Notes](#17-performance-notes)
 18. [Dependencies](#18-dependencies)
 
 ---
 
 ## 1. Overview
 
-### 1.1 What is domaingrep?
+### 1.1 What domaingrep does
 
-`domaingrep` is a CLI tool that performs bulk domain name availability searches at extreme speed. It checks a given domain name (SLD) against all known TLDs and reports which combinations appear available for registration using fast DNS-based checks.
+`domaingrep` checks a single input label across many TLDs and reports domains that appear available for registration.
 
-### 1.2 Core Philosophy
+The implementation is intentionally optimized for bulk candidate discovery, not registrar-perfect availability. Reserved, premium, or policy-blocked names may still differ from the CLI result.
 
-- **Instant speed** - 1-3 char domains via pre-built bitmap cache, 4+ via parallel DNS
-- **Zero config** - Great defaults, no setup required
-- **No interactive mode** - Pure non-interactive CLI, pipe-friendly
-- **Auto-update** - CLI and cache stay current automatically
-- **Cross-platform** - macOS, Linux, Windows
+### 1.2 Two-tier resolution strategy
 
-### 1.3 Key Innovation
-
-**Two-tier availability check:**
-
-| Domain Length | Method | Speed |
+| Domain length | Method | Source |
 |---|---|---|
-| 1-3 characters | Pre-built bitmap cache (daily) | O(1), instant |
-| 4+ characters | Live DNS-over-HTTPS queries | ~2-5s parallel |
+| 1-3 characters | Bitmap cache lookup | Local `cache.bin` |
+| 4+ characters | Live UDP DNS NS query | Shared Rust resolver engine |
 
-The bitmap cache stores a daily DNS-based availability snapshot for every possible 1-3 character domain across all TLDs. It is rebuilt daily by GitHub Actions and stored as a GitHub Release asset (~1-2 MB gzipped).
+For domain hacks, the method is chosen by the hack SLD length, not by the original input length.
 
-This is optimized for fast bulk candidate discovery rather than registrar-perfect accuracy. Reserved, premium, or registry-blocked names may still differ from the CLI's availability result.
+### 1.3 External behavior
+
+- Non-interactive CLI only
+- Plain text by default, NDJSON with `--json`
+- Available-only by default, full listing with `--all`
+- Background cache refresh and update check are best-effort and never block the main query
+- DNS query failures are collapsed to `unavailable` rather than surfaced as partial-output skips
 
 ---
 
 ## 2. Architecture
 
-### 2.1 Execution Flow
+### 2.1 Execution flow
 
-```
-domaingrep <input>
+```text
+domaingrep <DOMAIN>
     |
     v
-[1. Parse & Validate Input]
+[1] Parse and validate input
     |
     v
-[2. Concurrent Operations] ----+---- [Cache freshness check (background)]
-    |                          |
-    |                          +---- [CLI version check (background)]
+[2] Start background work
+    |--- cache freshness check (best effort)
+    |--- CLI update check (best effort)
     |
     v
-[3. Resolve Availability]
-    |--- 1-3 char: Bitmap cache lookup (O(1))
-    |--- 4+ char:  Parallel DoH queries to Cloudflare/Google DNS
+[3] Load cache
     |
     v
-[4. Domain Hack Detection]
-    |--- Find all valid TLD suffix splits
-    |--- Check availability for each hack
+[4] Resolve domain hacks (mode A only)
+    |--- 1-3 char hack SLD -> bitmap cache
+    |--- 4+ char hack SLD  -> UDP DNS resolver
     |
     v
-[5. Sort & Format Results]
-    |--- Domain hacks at top
-    |--- Then: TLD length ascending, same length by popularity
+[5] Resolve regular TLD matches
+    |--- 1-3 char SLD -> bitmap cache
+    |--- 4+ char SLD  -> UDP DNS resolver
     |
     v
-[6. Output to stdout]
-    |--- Plain text (default) or JSON (--json)
+[6] Sort and format results
+    |
+    v
+[7] Print stdout, then optional stderr notes
 ```
 
-### 2.2 Data Flow Diagram
+### 2.2 Current resolver architecture
 
-```
-GitHub Actions (daily cron)
-    |
-    v
-[Cache Builder] ---> [GitHub Release Asset]
-    |                      |
-    |  (tld-list.com)      | (HTTP download)
-    |                      |
-    v                      v
-[TLD List JSON]    [CLI: domaingrep]
-                       |
-                       +---> XDG_CACHE_HOME/domaingrep/
-                        |         |- cache.bin          (bitmap, decompressed)
-                        |         |- cache.meta         (metadata + asset checksum)
-                        |         |- last_update_check  (timestamp)
-                       |
-                       +---> Cloudflare DoH (4+ char)
-                       |         |- Primary: cloudflare-dns.com
-                       |         |- Fallback: dns.google
-                       |
-                       v
-                   [stdout: results]
-```
+The live resolver is a Rust-native UDP stub resolver shared by:
+
+- the CLI for 4+ character domains
+- the cache builder for 1-3 character cache generation
+- the TLD probe step used by `cache-builder fetch-tlds`
+
+The resolver currently uses:
+
+- DNS wire-format packet construction in `src/resolve/wire.rs`
+- non-blocking UDP sockets built with `socket2`
+- `mio::Poll` for readiness polling
+- a direct-indexed lookup slab keyed by DNS transaction ID
+- a timing wheel for retries and timeouts
+
+It does not use DoH, `reqwest`, or an external `massdns` subprocess.
+
+### 2.3 Runtime configuration via environment
+
+These environment variables are supported by the CLI runtime:
+
+| Variable | Meaning |
+|---|---|
+| `DOMAINGREP_CACHE_DIR` | Override cache directory |
+| `DOMAINGREP_CACHE_URL` | Override cache asset URL |
+| `DOMAINGREP_CACHE_CHECKSUM_URL` | Override checksum URL |
+| `DOMAINGREP_UPDATE_API_URL` | Override GitHub latest-release API URL |
+| `DOMAINGREP_RESOLVERS` | Override resolver list (comma or whitespace separated) |
+| `DOMAINGREP_RESOLVE_CONCURRENCY` | Override live resolver concurrency |
+| `DOMAINGREP_RESOLVE_TIMEOUT_MS` | Override per-attempt timeout in milliseconds |
+| `DOMAINGREP_RESOLVE_ATTEMPTS` | Override max attempts per domain |
+| `DOMAINGREP_RESOLVE_SOCKET_COUNT` | Override number of UDP sockets |
+| `DOMAINGREP_DISABLE_UPDATE` | Disable background version check |
+
+`DOMAINGREP_RESOLVERS` accepts IPs or socket addresses such as `1.1.1.1`, `8.8.8.8:53`, or mixed comma/whitespace-separated lists.
 
 ---
 
@@ -126,1202 +135,627 @@ GitHub Actions (daily cron)
 
 ### 3.1 Usage
 
-```
+```text
 domaingrep [OPTIONS] <DOMAIN>
 ```
 
-### 3.2 Positional Arguments
+### 3.2 Positional argument
 
 | Argument | Description |
 |---|---|
-| `<DOMAIN>` | Domain to search. Can be SLD only (`abc`) or SLD with TLD prefix (`abc.sh`). Single domain only. |
+| `<DOMAIN>` | Search target. Supports `abc` or `abc.sh`. Exactly one domain only. |
 
-### 3.3 Flags & Options
+### 3.3 Flags and options
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--all` | `-a` | `false` | Show unavailable domains too (default: available only) |
-| `--json` | `-j` | `false` | Output as JSON (one object per line, NDJSON) |
-| `--tld-len <RANGE>` | `-t` | (all) | Filter TLDs by length. Supports: `2` (exact), `2..5` (inclusive range), `..3` (up to 3), `4..` (4 and above) |
-| `--limit <N>` | `-l` | (none) | Max number of rows emitted after filtering. Domain hacks count toward the total. All DNS requests are still made (no early termination). |
-| `--color <WHEN>` | | `auto` | Color output: `auto`, `always`, `never`. Auto detects TTY. |
-| `--help` | `-h` | | Show help message |
+| `--all` | `-a` | `false` | Show unavailable results too |
+| `--json` | `-j` | `false` | Emit NDJSON |
+| `--tld-len <RANGE>` | `-t` | all | Filter TLDs by length: `2`, `2..5`, `..3`, `4..` |
+| `--limit <N>` | `-l` | none | Maximum rows emitted after filtering |
+| `--color <WHEN>` | | `auto` | `auto`, `always`, `never` |
+| `--help` | `-h` | | Show help |
 | `--version` | `-V` | | Show version |
 
-### 3.4 Examples
-
-```bash
-# Search 'abc' across all TLDs (available only)
-domaingrep abc
-
-# TLD prefix match: 'sh' matches .sh, .shop, .show, etc.
-domaingrep abc.sh
-
-# Show all results including unavailable
-domaingrep abc --all
-
-# JSON output
-domaingrep abc --json
-
-# Only TLDs with 2-3 characters
-domaingrep abc --tld-len 2..3
-
-# Limit to first 10 available results
-domaingrep abc --limit 10
-
-# Domain hack detection: finds 'bun.sh' from input 'bunsh'
-domaingrep bunsh
-
-# Combine flags
-domaingrep myapp.de --tld-len ..4 --limit 20 --json
-
-# Multiple searches (documented approach)
-domaingrep abc; domaingrep xyz
-```
-
-### 3.5 Exit Codes
+### 3.4 Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | At least one available domain found (follows `grep` convention) |
-| `1` | No available domains found |
-| `2` | Error (invalid input, network failure, etc.) |
+| `0` | At least one available result was emitted |
+| `1` | No available results |
+| `2` | Invalid input, cache/config/network/bootstrap error |
+
+Important: per-domain DNS timeouts and inconclusive responses do not produce exit code `2`. They collapse to `unavailable` and can contribute to exit code `1`.
 
 ---
 
-## 4. Input Parsing & Validation
+## 4. Input Parsing and Validation
 
-### 4.1 Input Modes
+### 4.1 Modes
 
-The input `<DOMAIN>` is parsed into one of two modes:
+**Mode A: SLD only**
 
-**Mode A: SLD Only** (no dot in input)
-```
-domaingrep abc     -> SLD = "abc", TLDs = all
-domaingrep bunsh   -> SLD = "bunsh", TLDs = all (+ domain hack detection)
+```text
+domaingrep abc
 ```
 
-**Mode B: SLD + TLD Prefix** (dot present)
+Parsed as:
+
+- `sld = "abc"`
+- `tld_prefix = None`
+- domain hack detection enabled
+
+**Mode B: SLD + TLD prefix**
+
+```text
+domaingrep abc.sh
 ```
-domaingrep abc.sh  -> SLD = "abc", TLD filter = prefix "sh" (matches .sh, .shop, .show, ...)
-domaingrep abc.com -> SLD = "abc", TLD filter = prefix "com" (matches .com, .community, ...)
-domaingrep abc.    -> Trailing dot ignored, treated as "abc" (Mode A)
+
+Parsed as:
+
+- `sld = "abc"`
+- `tld_prefix = Some("sh")`
+- domain hack detection disabled
+
+### 4.2 Normalization rules
+
+1. Input is lowercased silently.
+2. A single trailing dot is removed before dot-count validation.
+3. After trailing-dot removal, at most one dot is allowed.
+
+Examples:
+
+```text
+ABC      -> abc
+abc.     -> abc
+abc.co.  -> sld=abc, prefix=co
+abc.co.uk -> error
 ```
 
-### 4.2 Validation Rules
+### 4.3 Label validation rules
 
-1. **Allowed characters:** `[a-z0-9-]` (after lowercasing)
-2. **Auto-lowercase:** `ABC` -> `abc` (silent, no warning)
-3. **Trailing dot removal:** `abc.` -> `abc`
-4. **Hyphen rules (LDH syntax + reserved punycode pattern):**
-   - Cannot start with hyphen: `-abc` -> error
-   - Cannot end with hyphen: `abc-` -> error
-   - Cannot have hyphens at positions 3-4 (reserved for `xn--`/A-labels in IDN handling): `ab--c` -> error
-5. **Length limits:**
-   - SLD minimum: 1 character
-   - SLD maximum: 63 characters
-6. **Dot count:** at most one dot in `<DOMAIN>`; multi-label inputs like `abc.co.uk` -> error
-7. **Empty input:** error
-8. **Invalid characters:** error
+For both the SLD and the optional TLD prefix:
 
-### 4.3 Validation Error Format
+1. Allowed characters: `[a-z0-9-]`
+2. Minimum length: 1
+3. Maximum length: 63
+4. Cannot start with `-`
+5. Cannot end with `-`
+6. Cannot contain `--` at positions 3-4
 
-All errors follow the Why / Where / How to Fix pattern:
+### 4.4 Error format
 
+Errors use this shape:
+
+```text
+error: <message>
+  --> <optional context>
+  = help: <optional suggestion>
 ```
-error: invalid character '@' in domain 'abc@def'
-  --> position 4
+
+The `-->` line is emitted only when the implementation has a useful location/context string.
+
+Examples:
+
+```text
+error: invalid character '@' in domain 'ab@c'
+  --> position 3
   = help: only letters (a-z), numbers (0-9), and hyphens (-) are allowed
 ```
 
-```
-error: domain cannot start with a hyphen
-  --> '-abc'
-  = help: remove the leading hyphen, e.g., 'abc'
-```
-
-```
-error: domain too long (72 characters, max 63)
-  --> 'aaaaaa...aaa'
-  = help: domain labels must be 63 characters or fewer (RFC 1035)
+```text
+error: --limit must be at least 1
+  --> '--limit 0'
+  = help: use a positive integer such as '--limit 10'
 ```
 
 ---
 
 ## 5. Domain Hack Detection
 
-### 5.1 Algorithm
+### 5.1 Behavior
 
-Given input string `S` (no dot), find all suffixes of `S` that match a known TLD:
+For mode A inputs, domaingrep scans all suffixes of the input and matches them against the known TLD set.
 
-```
-Input: "bunsh"
+Example:
 
-Scan suffixes:
-  "bunsh" -> TLD "bunsh"? No
-  "unsh"  -> TLD "unsh"?  No
-  "nsh"   -> TLD "nsh"?   No
-  "sh"    -> TLD "sh"?    Yes -> "bun.sh"
-  "h"     -> TLD "h"?     No
-
-Result: domain hack "bun.sh" detected
+```text
+Input: bunsh
+Matches: bun.sh
 ```
 
 ### 5.2 Rules
 
-1. Only match against **valid, existing TLDs** from the TLD list
-2. The SLD portion (before the matched TLD) must be **at least 1 character**
-3. The SLD portion must be **valid** (same rules as 4.2)
-4. **Priority:** shorter SLD first (i.e., longest matching TLD first)
-   - `domaingrep openai` -> `ope.nai` (if .nai exists) before `opena.i` (if .i exists)
-5. Domain hack results are placed **at the top** of the output, before regular results
-6. Domain hack detection runs **in addition to** regular TLD search
-   - `domaingrep bunsh` shows both `bun.sh` (hack) AND `bunsh.com`, `bunsh.net`, etc. (regular)
-7. **Mode B (dot present): Domain hack detection is disabled**
-   - `domaingrep bunsh.sh` does NOT detect `bun.sh` as a hack; it only searches `bunsh` with TLD prefix `sh`
-8. **Availability check source for hacks:** The SLD from the hack split determines the check method:
-   - SLD 1-3 chars -> bitmap cache lookup (e.g., `bun.sh` -> "bun" is 3 chars -> cache)
-   - SLD 4+ chars -> live DNS query (e.g., `domaingre.p` -> "domaingre" is 9 chars -> DNS)
-9. **--limit interaction:** Domain hack results count toward the `--limit` total
-   - `--limit 5` with 3 hacks found -> shows 3 hacks + 2 regular results = 5 total
+1. Only known filtered TLDs are considered.
+2. The SLD part before the TLD must be at least 1 character.
+3. The derived SLD must pass the same label validation rules as normal input.
+4. Results are sorted by SLD length ascending.
+   This means longer matching TLDs appear first.
+5. Domain hack results are always emitted before regular results.
+6. In mode B (`abc.sh`), hack detection is disabled.
+7. Hack results count toward `--limit`.
 
-### 5.3 Data Structure for TLD Suffix Matching
+### 5.3 Resolution method
 
-Use a **reversed trie** built from the TLD list for efficient suffix matching:
-
-```
-TLD list: [sh, shop, show, com, co, ...]
-
-Reversed trie:
-  h -> s -> (match: "sh")
-       -> p -> o -> (match: "shop")
-  ...
-```
-
-For input "bunsh":
-1. Reverse: "hsnub"
-2. Walk the reversed trie from 'h'
-3. Find match at depth 2: "sh" -> split is "bun" + "sh"
+| Hack SLD length | Method |
+|---|---|
+| 1-3 | Cache lookup |
+| 4+ | Live UDP DNS resolution |
 
 ---
 
 ## 6. TLD Management
 
-### 6.1 TLD Source
+### 6.1 Source
 
-- **Primary:** `https://tld-list.com/df/tld-list-details.json`
-- **Refresh:** Daily, during cache build (GitHub Actions)
+- HTTP source: `https://tld-list.com/df/tld-list-details.json`
 
-### 6.2 TLD Filtering Criteria
+### 6.2 Filtering rules
 
-From the tld-list.com JSON, include a TLD only if **all** conditions are met:
+TLDs are included only if all of the following hold:
 
-1. **ASCII only:** `punycode` field is `null` AND TLD key contains only `[a-z]` characters (exclude numeric TLDs that aren't purchasable)
-2. **Not infrastructure:** `type` is not `"infrastructure"` (excludes `.arpa`)
-3. **Publicly registrable:** TLD is available for public registration (not a brand-only TLD). Determined by **probe testing** during cache build:
-   - Step 1: Query `nic.{tld}` for NS records. If no NS records exist, TLD is inactive -> exclude.
-   - Step 2: Query `xyzzy-probe-test-{random}.{tld}` for NS records. If NXDOMAIN is returned, TLD supports public registration -> include. If NOERROR (wildcard) or SERVFAIL (after 3 retries), exclude.
-   - This automatically filters out brand TLDs (e.g., `.google`, `.apple`) that don't allow public registration.
+1. ASCII lowercase key only
+2. `punycode` is `null`
+3. `type != "infrastructure"`
+4. Public registration probe passes
 
-### 6.3 TLD Sorting
+### 6.3 Public registration probe
 
-Results are sorted by:
+The builder uses the shared UDP resolver in two passes:
 
-1. **Primary:** TLD length ascending (`.io` before `.com` before `.shop`)
-2. **Secondary (same length):** Popularity order from hardcoded list
+1. Query `nic.{tld}` with `NS`
+   - include only if `RCODE == NOERROR` and `answer_count > 0`
+2. Query `xyzzy-probe-test-{random}.{tld}` with `NS`
+   - include only if `RCODE == NXDOMAIN`
 
-### 6.4 Hardcoded Popularity List
+Any timeout or inconclusive result excludes the TLD.
 
-Top ~50 TLDs in popularity order (used as secondary sort key):
+### 6.4 Sorting
 
-```rust
-const TLD_POPULARITY: &[&str] = &[
-    // Length 2
-    "io", "ai", "co", "me", "to", "sh", "cc", "tv", "is", "so",
-    "im", "ly", "fm", "am", "it", "us", "uk", "de", "fr", "nl",
-    "be", "at", "ch", "se", "no", "fi", "dk", "jp", "kr", "in",
-    "ca", "au", "nz", "za", "br", "mx",
-    // Length 3
-    "com", "net", "org", "dev", "app", "xyz", "art", "fun", "icu", "top",
-    "pro", "bio", "biz",
-    // Length 4+
-    "info", "club", "site", "tech", "shop", "blog", "design",
-];
-```
+Regular results are sorted by:
 
-TLDs not in the popularity list are sorted alphabetically after the popular ones.
+1. TLD length ascending
+2. Hardcoded popularity order
+3. Alphabetical order
 
-### 6.5 --tld-len Range Syntax
+### 6.5 `--tld-len`
 
-The `--tld-len` flag accepts a range:
+Supported syntax:
 
-| Input | Meaning | Parsed |
-|---|---|---|
-| `2` | Exactly length 2 | `min=2, max=2` |
-| `2..5` | Length 2 to 5 (inclusive) | `min=2, max=5` |
-| `..3` | Up to 3 (inclusive) | `min=1, max=3` |
-| `4..` | 4 and above | `min=4, max=MAX` |
-
-This is a user-friendly inclusive range syntax: `2..5` means 2 through 5, not Rust's exclusive upper-bound semantics.
+| Input | Meaning |
+|---|---|
+| `2` | exactly 2 |
+| `2..5` | inclusive range |
+| `..3` | up to 3 |
+| `4..` | 4 and above |
 
 ---
 
 ## 7. Cache System (1-3 Character Domains)
 
-### 7.1 Overview
+### 7.1 Scope
 
-All possible 1-3 character domains across all TLDs are pre-checked daily and stored in a compact bitmap. The bitmap is published as a GitHub Release asset and downloaded by the CLI on first run.
+The cache stores availability bits for all valid 1-3 character labels across the filtered TLD set.
 
-### 7.2 Domain Space
+### 7.2 Domain space
 
-Valid characters: `[a-z0-9]` (36 chars) for start/end positions, `[a-z0-9-]` (37 chars) for middle positions.
+| Length | Count |
+|---|---|
+| 1 | 36 |
+| 2 | 1,296 |
+| 3 | 47,952 |
+| Total | 49,284 |
 
-- 1-char domains: only `[a-z0-9]` (no hyphen possible)
-- 2-char domains: `[a-z0-9]` x `[a-z0-9]` (no room for middle hyphen)
-- 3-char domains: `[a-z0-9]` x `[a-z0-9-]` x `[a-z0-9]` (middle position allows hyphen, e.g., `a-b`)
+Character rules used for indexing:
 
-| Length | Calculation | Count |
-|---|---|---|
-| 1 char | 36 | 36 |
-| 2 char | 36 x 36 | 1,296 |
-| 3 char | 36 x 37 x 36 | 47,952 |
-| **Total** | | **49,284** |
+- edge positions: `[a-z0-9]`
+- middle position of 3-char labels: `[a-z0-9-]`
 
-With ~1,200 TLDs (after filtering): 49,284 x 1,200 = ~59.1M domain-TLD pairs.
+### 7.3 File format
 
-### 7.3 Bitmap Format
+`cache.bin` contains:
 
-#### File Structure
+1. magic bytes: `DGRP`
+2. format version: `u16 LE`
+3. build timestamp: `i64 LE`
+4. TLD count: `u16 LE`
+5. SHA-256 of bitmap payload
+6. variable-length TLD index table
+7. bitmap payload
 
-```
-+----------------------------------+
-| Header (fixed size)              |
-|   - Magic bytes (4B): "DGRP"    |
-|   - Format version (2B): u16    |
-|   - Timestamp (8B): i64 unix    |
-|   - TLD count (2B): u16         |
-|   - Checksum (32B): SHA-256     |
-+----------------------------------+
-| TLD Index Table                  |
-|   - For each TLD:               |
-|     - Length (1B): u8            |
-|     - TLD string (variable)     |
-+----------------------------------+
-| Bitmap Data                      |
-|   - Ordered by: TLD index, then |
-|     domain index within TLD     |
-|   - 1 bit per domain-TLD pair   |
-|   - 1 = available               |
-|   - 0 = unavailable             |
-+----------------------------------+
-```
+The bitmap is ordered by:
 
-#### Domain Index Calculation
+1. TLD index
+2. domain index within that TLD
 
-Each domain maps to a deterministic index:
+`1` means available, `0` means unavailable.
 
-```rust
-fn char_to_val(ch: char, allow_hyphen: bool) -> u32 {
-    match ch {
-        'a'..='z' => (ch as u32) - ('a' as u32),        // 0-25
-        '0'..='9' => 26 + (ch as u32) - ('0' as u32),   // 26-35
-        '-' if allow_hyphen => 36,                        // 36
-        _ => unreachable!(), // validated before reaching here
-    }
-}
+### 7.4 Local storage
 
-fn domain_to_index(domain: &str) -> u32 {
-    let chars: Vec<char> = domain.chars().collect();
-    let len = chars.len();
+Default cache directory:
 
-    // Offset for shorter domains
-    let offset: u32 = match len {
-        1 => 0,                               // 1-char: starts at 0
-        2 => 36,                              // 2-char: starts after 36
-        3 => 36 + 1_296,                      // 3-char: starts after 36 + 36*36
-        _ => unreachable!(),
-    };
+- Linux: `~/.cache/domaingrep/`
+- macOS: `~/Library/Caches/domaingrep/`
+- Windows: `%LOCALAPPDATA%/domaingrep/`
 
-    // Calculate position within same-length group
-    let index = match len {
-        1 => char_to_val(chars[0], false),
-        2 => {
-            char_to_val(chars[0], false) * 36
-            + char_to_val(chars[1], false)
-        }
-        3 => {
-            // first: 36 chars, middle: 37 chars (includes hyphen), last: 36 chars
-            char_to_val(chars[0], false) * (37 * 36)
-            + char_to_val(chars[1], true) * 36
-            + char_to_val(chars[2], false)
-        }
-        _ => unreachable!(),
-    };
+Files:
 
-    offset + index
-}
+```text
+cache.bin
+cache.meta
+last_update_check
 ```
 
-#### Bit Lookup
+### 7.5 Lifecycle
 
-```rust
-fn is_available(cache: &[u8], tld_index: usize, domain: &str) -> bool {
-    let domain_index = domain_to_index(domain) as usize;
-    let domains_per_tld = 49_284; // total 1-3 char domains (36 + 1296 + 47952)
-    let bit_position = tld_index * domains_per_tld + domain_index;
-    let byte_offset = bit_position / 8;
-    let bit_offset = bit_position % 8;
-    (cache[byte_offset] >> (7 - bit_offset)) & 1 == 1
-}
-```
+1. If `cache.bin` exists and parses, use it immediately.
+2. If stale (>=24h), continue using it and start a background refresh.
+3. If missing or corrupt, download `cache.bin.gz` and `cache.sha256`.
+4. Verify checksum, decompress, and atomically replace local files.
+5. If no local cache exists and download fails, command exits with code `2`.
 
-#### Size Estimation
-
-- Bitmap: 49,284 domains x 1,200 TLDs = 59,140,800 bits = ~7.4 MB raw
-- After gzip: estimated ~1-2 MB (bitmap data is highly compressible due to sparsity)
-
-### 7.4 Local Cache Storage
-
-**Location:** Determined by `dirs::cache_dir()` + `/domaingrep/`:
-- **Linux:** `~/.cache/domaingrep/`
-- **macOS:** `~/Library/Caches/domaingrep/`
-- **Windows:** `%LOCALAPPDATA%/domaingrep/`
-
-**Files:**
-```
-{cache_dir}/domaingrep/
-  cache.bin            # decompressed bitmap cache used for lookups/mmap
-  cache.meta           # metadata JSON: {"format_version":1,"timestamp":1711670400,"asset_url":"..."}
-  last_update_check    # plain text Unix timestamp (e.g., "1711670400")
-```
-
-**cache.meta format (JSON):**
-```json
-{
-  "format_version": 1,
-  "timestamp": 1711670400,
-  "asset_url": "https://github.com/ysm-dev/domaingrep/releases/download/cache-latest/cache.bin.gz",
-  "asset_sha256": "a1b2c3..."
-}
-```
-
-**last_update_check format:** Plain text file containing a single Unix timestamp (seconds). Example: `1711670400`
-
-### 7.5 Cache Lifecycle
-
-```
-First Run:
-  1. Check XDG_CACHE_HOME for existing cache
-  2. No cache found -> download cache.bin.gz from GitHub Releases
-  3. Verify SHA-256 checksum of downloaded asset
-  4. Decompress to cache.bin, then memory-map
-  5. Perform lookups
-
-Subsequent Runs:
-  1. Load local cache (instant)
-  2. Check cache age from metadata
-  3. If stale (>24h): use stale cache for query, AND start best-effort background refresh
-  4. Background refresh: fetch new cache while query runs
-  5. On download complete: verify checksum, write to temp file, atomic rename
-
-No Local Cache + Download Failure:
-  -> Error message + exit 2 (no fallback to DNS for short domains)
-
-Background Refresh Failure:
-  -> Keep using existing local cache
-  -> Optionally print note to stderr in verbose/debug builds
-
-Corrupt Cache:
-  -> Delete local cache, re-download from GitHub Releases
-  -> If re-download also fails: error + exit 2
-
-Concurrent Instances:
-  -> Downloads write to temp file (cache.bin.{pid}.tmp)
-  -> Atomic rename to cache.bin on completion
-  -> On Unix: rename() is atomic; on Windows: use ReplaceFile API
-  -> Readers are unaffected (they memory-map the current cache.bin at startup)
-```
-
-### 7.6 Stale-While-Revalidate
-
-The cache uses a stale-while-revalidate strategy:
-
-```
-Cache Age < 24h:  Use as-is (fresh)
-Cache Age >= 24h: Use immediately (stale), start best-effort background refresh
-Background task:  Download new cache -> verify checksum -> write to tmp -> atomic rename
-```
-
-The refresh runs concurrently with the main query but never delays result output or process exit. If the process exits before the refresh finishes, the refresh is abandoned and retried on a later run.
+Short-domain resolution never falls back to live DNS if the cache cannot be bootstrapped.
 
 ---
 
-## 8. Live DNS Resolution (4+ Character Domains)
+## 8. UDP DNS Resolution (4+ Character Domains)
 
-### 8.1 DNS-over-HTTPS Provider
+### 8.1 Query model
 
-- **Primary:** Cloudflare DoH (`https://cloudflare-dns.com/dns-query`)
-- **Fallback:** Google DoH (`https://dns.google/resolve`)
+- Record type: `NS`
+- Transport: UDP to configured recursive resolvers
+- No DoH
+- No TCP fallback
 
-### 8.2 Query Format
+### 8.2 Default resolver list
 
-```
-GET https://cloudflare-dns.com/dns-query?name=example.com&type=NS
-Accept: application/dns-json
-```
+Default embedded resolvers:
 
-Response (JSON):
-```json
-{
-  "Status": 0,
-  "TC": false,
-  "RD": true,
-  "RA": true,
-  "AD": false,
-  "CD": false,
-  "Question": [{"name": "example.com", "type": 2}],
-  "Answer": [{"name": "example.com", "type": 2, "TTL": 21599, "data": "ns1.example.com."}]
-}
+```text
+1.1.1.1
+1.0.0.1
+8.8.8.8
+8.8.4.4
+9.9.9.9
+149.112.112.112
+208.67.222.222
+208.67.220.220
 ```
 
-### 8.3 Availability Determination
+### 8.3 Classification
 
-```
-DNS Response Status:
-  - NXDOMAIN (Status: 3)  -> available = true
-  - NOERROR  (Status: 0)  -> available = false (domain exists)
-  - SERVFAIL (Status: 2)  -> retry with fallback provider
-  - Other                 -> retry with fallback provider
-```
+The shared classification rule is:
 
-**Simplification:** NXDOMAIN = available, everything else = unavailable. No wildcard/parking IP detection.
+| Result | Meaning |
+|---|---|
+| `NXDOMAIN` | available |
+| `NOERROR` | unavailable |
+| other RCODE | retry, then unavailable if attempts exhausted |
+| timeout / no response | retry, then unavailable if attempts exhausted |
 
-This is an intentionally fast heuristic for bulk discovery and may not exactly match registrar-side purchasability.
+There is no external `unknown` state.
 
-### 8.4 HTTP Client Configuration
+### 8.4 Resolver defaults
 
-```rust
-// reqwest client settings
-let client = reqwest::Client::builder()
-    .connect_timeout(Duration::from_secs(5))
-    .timeout(Duration::from_secs(10))
-    .user_agent(format!("domaingrep/{}", env!("CARGO_PKG_VERSION")))
-    .http2_prior_knowledge()  // DoH servers support HTTP/2
-    .pool_max_idle_per_host(50)
-    .build()?;
-```
+CLI defaults:
 
-| Setting | Value | Rationale |
-|---|---|---|
-| `connect_timeout` | 5 seconds | Fail fast on unreachable servers |
-| `timeout` | 10 seconds | Max total request time including response |
-| `User-Agent` | `domaingrep/{version}` | Identify traffic, good netizen behavior |
-| HTTP version | HTTP/2 | Multiplexing reduces connection overhead |
-| Pool idle | 50 per host | Reuse connections across parallel requests |
+- concurrency: `1000`
+- timeout: `500ms`
+- max attempts: `4`
+- socket count: `1`
 
-### 8.5 Concurrency Model
+Builder defaults:
 
-```rust
-// Adaptive concurrency with backoff
-struct DnsResolver {
-    primary: CloudflareDoH,
-    fallback: GoogleDoH,
-    semaphore: Semaphore,       // limits concurrent requests
-    initial_concurrency: usize, // 100
-}
-```
+- concurrency: `10000`
+- timeout: `500ms`
+- max attempts: `4`
+- socket count: `4` on Linux, otherwise `1`
 
-1. Start with 100 concurrent requests via `tokio::Semaphore`
-2. If HTTP 429 (rate limit) from primary: switch to fallback for that request
-3. If both fail: skip that TLD, count as failure
-4. All TLDs are queried in parallel (no early termination even with `--limit`)
-5. Domain hack results follow the same logic: SLD length determines source (1-3 char -> cache, 4+ char -> DNS)
+### 8.5 Internal engine behavior
 
-### 8.6 Request Flow per TLD
+The live resolver:
 
-```
-1. Acquire semaphore permit
-2. Send DoH query to Cloudflare
-3. On success: return result
-4. On failure (429/timeout/error):
-   a. Send DoH query to Google DNS (fallback)
-   b. On success: return result
-   c. On failure: mark as skipped
-5. Release semaphore permit
-```
+1. builds DNS wire-format NS query packets
+2. allocates a unique transaction ID
+3. sends packets over non-blocking UDP sockets
+4. tracks in-flight lookups in a slab indexed by transaction ID
+5. retries timed-out or inconclusive lookups via a timing wheel
+6. returns definitive `rcode`/`answer_count` or `None`
 
-### 8.7 NS Record Query
-
-The DNS query type is `NS` (not `A`):
-
-- A registered domain is typically delegated with NS records
-- An unregistered domain returns NXDOMAIN
-- This avoids false negatives from domains without A/AAAA records
+For CLI-visible output, `None` is treated as unavailable.
 
 ---
 
 ## 9. Output Format
 
-### 9.1 Plain Text (Default)
+### 9.1 Plain text
 
-```
-$ domaingrep bunsh
+Default output emits only available results:
 
-bun.sh            # domain hack (at top)
+```text
+bun.sh
 bunsh.io
-bunsh.co
-bunsh.to
-bunsh.com
 bunsh.dev
-bunsh.app
 ```
 
 With `--all`:
-```
-$ domaingrep bunsh --all
 
-  bun.sh            # domain hack, available
+```text
+  bun.sh
 x bunsh.io
-  bunsh.co
-x bunsh.to
-x bunsh.com
   bunsh.dev
-  bunsh.app
 ```
 
-### 9.2 Symbols & Colors
+### 9.2 JSON
 
-| Status | Symbol | Color |
-|---|---|---|
-| Available | ` ` (space, 2 chars indent) | Default/Green |
-| Unavailable | `x` (1 char + space) | Dim/Gray |
-
-- Colors are ANSI escape codes
-- Auto-detected via `isatty()`: disabled when piped or redirected
-- Override with `--color=always` or `--color=never`
-
-When `--all` is **not** set, only available domains are shown (no symbols needed, just the domain name):
-
-```
-$ domaingrep bunsh
-
-bun.sh
-bunsh.co
-bunsh.dev
-bunsh.app
-```
-
-### 9.3 JSON Output (--json)
-
-NDJSON format (one JSON object per line):
+`--json` emits NDJSON, one object per line:
 
 ```json
 {"domain":"bun.sh","available":true,"kind":"hack","method":"cache"}
-{"domain":"bunsh.io","available":true,"kind":"regular","method":"dns"}
-{"domain":"bunsh.com","available":false,"kind":"regular","method":"dns"}
+{"domain":"bunsh.io","available":false,"kind":"regular","method":"dns"}
 ```
 
-- Fields: `domain`, `available`, `kind` (`hack` or `regular`), `method` (`cache` or `dns`)
-- With `--all`: includes unavailable domains
-- Without `--all`: only available domains (all `available: true`)
+Fields:
 
-### 9.4 Output Order
+- `domain`
+- `available`
+- `kind`: `hack` or `regular`
+- `method`: `cache` or `dns`
 
-1. **Domain hacks** (if any detected) - sorted by SLD length ascending
-2. **Regular results** - sorted by:
-   - Primary: TLD length ascending
-   - Secondary: TLD popularity (hardcoded list)
-   - Tertiary: Alphabetical
+### 9.3 Ordering
 
-### 9.5 Pipe Behavior
+1. All hack results first
+2. Then regular results sorted by TLD length, popularity, alphabetically
 
-When stdout is not a TTY (piped):
-- No ANSI color codes
-- No progress indicators
-- Clean, parseable output
-- One record per line in the selected format
+### 9.4 `--limit`
+
+`--limit` is applied after visibility filtering:
+
+- without `--all`: after dropping unavailable results
+- with `--all`: after including both available and unavailable results
+
+All DNS work is still performed before truncation.
+
+### 9.5 stderr notes
+
+Current stderr notes:
+
+- `note: no available domains found for '{input}'`
+- update notice, if background update check finishes before process exit
+
+The implementation does not emit a partial-DNS-failure note.
 
 ---
 
 ## 10. Auto-Update
 
-### 10.1 GitHub Repository
+### 10.1 Version check
 
-- **Owner/Repo:** `ysm-dev/domaingrep`
-- **Cache Release URL:** `https://github.com/ysm-dev/domaingrep/releases/download/cache-latest/cache.bin.gz`
-- **Cache Checksum URL:** `https://github.com/ysm-dev/domaingrep/releases/download/cache-latest/cache.sha256`
-- **Latest Release API:** `https://api.github.com/repos/ysm-dev/domaingrep/releases/latest`
+When `last_update_check` is missing or at least 24 hours old:
 
-### 10.2 CLI Version Check
+1. start a background GitHub API request
+2. fetch latest release metadata
+3. compare current version with release tag
+4. if newer and ready before exit, print a stderr note
+5. update `last_update_check`
 
-On runs where the previous check is missing or at least 24h old, a **best-effort non-blocking** background check is performed:
+### 10.2 Guarantees
 
-```
-1. Read {cache_dir}/domaingrep/last_update_check
-2. If <24h old: skip check
-3. If >=24h or missing:
-    a. Spawn async task (non-blocking)
-    b. Query GitHub API: GET /repos/ysm-dev/domaingrep/releases/latest
-    c. Compare version tag with current binary version
-    d. If newer and the check completes before process exit: print notice to stderr after results
-    e. Update last_update_check timestamp on successful completion
-```
-
-### 10.3 Update Notice
-
-```
-$ domaingrep abc
-abc.sh
-abc.io
-...
-
-note: domaingrep v0.3.0 is available (current: v0.2.0)
-  -> brew upgrade domaingrep
-  -> cargo install domaingrep
-  -> curl -fsSL https://domaingrep.dev/install.sh | sh
-```
-
-- Printed to **stderr** (doesn't interfere with piped stdout)
-- Best-effort and non-blocking (never delays result output or process exit)
-- Maximum once per 24 hours
-
-### 10.4 Cache Update
-
-Cache is updated via stale-while-revalidate (see section 7.6). The background refresh runs concurrently with the main query and never blocks output or exit.
+- best effort only
+- never delays main output
+- maximum once per 24 hours
 
 ---
 
-## 11. Cache Builder (GitHub Actions)
+## 11. Cache Builder and GitHub Actions
 
-### 11.1 Overview
+### 11.1 Commands
 
-A daily GitHub Actions workflow rebuilds the bitmap cache by querying DNS for all 1-3 character domains across all TLDs.
+The `cache-builder` binary exposes three commands:
 
-### 11.2 Scale
-
-- ~49,284 possible domains x ~1,200 TLDs = ~59.1M DNS queries
-- Sharded across parallel matrix jobs for speed
-
-Because this workload is large, the matrix sizes below are illustrative. Production builds may require self-hosted runners and/or a resolver source with explicit high-volume usage allowance.
-
-### 11.3 Workflow Design
-
-```yaml
-# .github/workflows/cache-build.yml
-name: Build Domain Cache
-
-on:
-  schedule:
-    - cron: '0 2 * * *'  # Daily at 2:00 UTC
-  workflow_dispatch:       # Manual trigger
-
-jobs:
-  fetch-tlds:
-    runs-on: ubuntu-latest
-    outputs:
-      tld-groups: ${{ steps.split.outputs.groups }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Fetch and filter TLD list
-        id: split
-        run: |
-          # Download tld-list.com JSON
-          # Filter: ASCII only, publicly registrable, no infrastructure
-          # Split into groups of ~40 TLDs each for parallel processing
-          # Output as JSON matrix
-
-  scan:
-    needs: fetch-tlds
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        group: ${{ fromJSON(needs.fetch-tlds.outputs.tld-groups) }}
-      fail-fast: false
-      max-parallel: 12
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build cache builder
-        run: cargo build --release --bin cache-builder
-      - name: Scan TLD group
-        run: ./target/release/cache-builder scan --tlds '${{ matrix.group }}'
-      - name: Upload partial bitmap
-        uses: actions/upload-artifact@v4
-        with:
-          name: bitmap-${{ matrix.group }}
-          path: partial-bitmap.bin
-
-  merge:
-    needs: scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download all partial bitmaps
-        uses: actions/download-artifact@v4
-      - name: Merge bitmaps
-        run: ./target/release/cache-builder merge --output cache.bin
-      - name: Compress
-        run: gzip -9 cache.bin
-      - name: Generate checksum
-        run: sha256sum cache.bin.gz > cache.sha256
-      - name: Create/Update Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: cache-latest
-          files: |
-            cache.bin.gz
-            cache.sha256
-          prerelease: true
-```
-
-### 11.4 Cache Builder Binary
-
-Located at `src/bin/cache_builder.rs`. Shares the same crate as the CLI.
-
-**Commands:**
-
-```
+```text
 cache-builder fetch-tlds
-  # Fetch TLD list from tld-list.com, filter, output JSON
-
-cache-builder scan --tlds <TLD_LIST>
-  # Scan all 1-3 char domains for given TLDs via Cloudflare DoH (NS record)
-  # Output: partial bitmap file
-
+cache-builder scan --tlds <...>
 cache-builder merge --output <PATH>
-  # Merge all partial bitmap files into final cache.bin
-  # Generates header with TLD index table
 ```
 
-### 11.5 DNS Query Strategy (Cache Builder)
+### 11.2 `fetch-tlds`
 
-- **Provider:** Prototype with Cloudflare DoH JSON; production builder may need a dedicated/high-volume resolver source
-- **Record type:** NS
-- **Concurrency:** 100-200 concurrent requests per job (tuned conservatively to avoid rate limits)
-- **Rate limiting:** Adaptive backoff on 429 responses
-- **Retry:** 3 attempts per query before marking as unavailable
+Responsibilities:
 
-### 11.6 TLD List Freshness & Probe Testing
+1. fetch TLD JSON from the source URL
+2. probe public registrability using the shared resolver engine
+3. sort and split TLDs into groups
+4. print JSON matrix output for GitHub Actions
 
-The cache builder fetches the TLD list from tld-list.com on every run, ensuring new TLDs are automatically included and removed TLDs are dropped.
+### 11.3 `scan`
 
-**TLD probe test (during fetch-tlds job):**
+Responsibilities:
 
-```
-For each TLD from tld-list.com (after ASCII/type filtering):
-  1. Query NS for nic.{tld}
-     - No NS records -> TLD inactive -> EXCLUDE
-  2. Query NS for xyzzy-probe-test-{random_hex}.{tld}
-     - NXDOMAIN -> public registration supported -> INCLUDE
-     - NOERROR  -> wildcard DNS (brand TLD) -> EXCLUDE
-     - SERVFAIL -> retry up to 3 times, then EXCLUDE
-```
+1. generate all short domains
+2. resolve `{domain}.{tld}` with shared UDP DNS engine in chunks
+3. set bitmap bits for available results
+4. write `partial-bitmap.bin`
 
-This eliminates the need for a manually maintained brand TLD exclusion list.
+This command no longer depends on `massdns`.
 
-### 11.7 Cache Release Strategy
+### 11.4 `merge`
 
-The cache is published under a fixed tag `cache-latest` that is overwritten daily:
+Responsibilities:
 
-```
-Tag:    cache-latest (overwritten, not versioned)
-Assets: cache.bin.gz, cache.sha256
-URL:    https://github.com/ysm-dev/domaingrep/releases/download/cache-latest/cache.bin.gz
-```
+1. collect all partial bitmap files
+2. merge per-TLD slices into a single cache file
+3. write final `cache.bin`
 
-The GitHub Actions workflow deletes the existing `cache-latest` release and recreates it with new assets each day.
+### 11.5 GitHub Actions workflow
+
+Current cache build workflow:
+
+1. build `cache-builder`
+2. run `fetch-tlds`
+3. matrix-scan TLD groups with `cache-builder scan`
+4. merge partial bitmaps
+5. gzip and checksum the final cache
+6. publish `cache-latest` release assets
 
 ---
 
-## 12. Distribution & Installation
+## 12. Distribution and Installation
 
-### 12.1 Distribution Channels
+The repository includes release automation for:
 
-| Channel | Package Name | Command |
-|---|---|---|
-| Homebrew | `domaingrep` | `brew install domaingrep` |
-| Shell script | - | `curl -fsSL https://domaingrep.dev/install.sh \| sh` |
-| npm | `domaingrep` | `npx domaingrep` / `npm i -g domaingrep` |
-| Cargo | `domaingrep` | `cargo install domaingrep` |
+- GitHub release archives
+- crates.io publication
+- npm wrapper/platform packages
+- Homebrew tap update
 
-### 12.2 npm Binary Distribution
-
-Uses the `optionalDependencies` pattern (same as biome, napi-rs):
-
-```
-domaingrep                     (main package, JS wrapper)
-  @domaingrep/darwin-arm64     (macOS Apple Silicon)
-  @domaingrep/darwin-x64       (macOS Intel)
-  @domaingrep/linux-arm64-gnu  (Linux ARM64)
-  @domaingrep/linux-arm64-musl (Linux ARM64 musl)
-  @domaingrep/linux-x64-gnu    (Linux x64)
-  @domaingrep/linux-x64-musl   (Linux x64 musl)
-  @domaingrep/win32-x64        (Windows x64)
-```
-
-The main `domaingrep` package contains a thin JS wrapper that locates and executes the platform-specific binary.
-
-### 12.3 Shell Install Script
-
-```bash
-curl -fsSL https://domaingrep.dev/install.sh | sh
-```
-
-Installs to `~/.domaingrep/bin/domaingrep` and advises the user to add to PATH:
-
-```
-domaingrep was installed to ~/.domaingrep/bin/domaingrep
-Add the following to your shell profile:
-  export PATH="$HOME/.domaingrep/bin:$PATH"
-```
-
-### 12.4 Cross-Compilation Targets
-
-| Target | OS | Arch |
-|---|---|---|
-| `x86_64-apple-darwin` | macOS | x64 |
-| `aarch64-apple-darwin` | macOS | ARM64 |
-| `x86_64-unknown-linux-musl` | Linux | x64 |
-| `aarch64-unknown-linux-musl` | Linux | ARM64 |
-| `x86_64-unknown-linux-gnu` | Linux | x64 |
-| `x86_64-pc-windows-msvc` | Windows | x64 |
-
-### 12.5 Binary Optimization
-
-In `Cargo.toml`:
-
-```toml
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-strip = true
-panic = "abort"
-```
-
-Expected binary size: ~3-5 MB.
+The shell install script is rendered during release and published with the release assets.
 
 ---
 
 ## 13. Project Structure
 
-### 13.1 Crate Layout
+```text
+src/
+  main.rs
+  lib.rs
+  cli.rs
+  input.rs
+  hack.rs
+  tld.rs
+  cache.rs
+  http.rs
+  resolve/
+    mod.rs
+    wire.rs
+    slab.rs
+    wheel.rs
+    socket.rs
+    engine.rs
+  output.rs
+  update.rs
+  error.rs
+  bin/
+    cache_builder.rs
 
+tests/
+  cli.rs
+  cache.rs
+  resolve.rs
+  hack.rs
+  output.rs
+  update.rs
+  live_dns_smoke.rs
+  common/
 ```
-domaingrep/
-  Cargo.toml
-  src/
-    main.rs              # Entry point, CLI arg parsing (clap)
-    lib.rs               # Library root, re-exports
-    cli.rs               # CLI argument definitions (clap derive)
-    input.rs             # Input parsing & validation
-    hack.rs              # Domain hack detection (trie-based)
-    tld.rs               # TLD list management, filtering, sorting
-    cache.rs             # Bitmap cache: load, lookup, download, verify
-    dns.rs               # DoH resolver: Cloudflare + Google fallback
-    output.rs            # Output formatting: plain text, JSON, colors
-    update.rs            # Auto-update check logic
-    error.rs             # Error types and formatting
-    bin/
-      cache_builder.rs   # Cache builder binary entry point
-  tests/
-    cli.rs              # End-to-end CLI tests
-    cache.rs            # Cache download & lookup tests
-    dns.rs              # DNS client tests (mostly mocked)
-    hack.rs             # Domain hack detection tests
-    output.rs           # Output format tests
-    live_dns_smoke.rs   # Small live-network smoke suite
-  data/
-    tld_popularity.rs    # Hardcoded TLD popularity order
-  .github/
-    workflows/
-      ci.yml             # PR: test + lint + build
-      release.yml        # Release: cross-compile + publish
-      cache-build.yml    # Daily: cache rebuild
-```
-
-### 13.2 Module Responsibilities
-
-| Module | Responsibility |
-|---|---|
-| `cli.rs` | Clap derive structs, arg validation |
-| `input.rs` | Parse input string, determine mode (SLD only / SLD+TLD prefix), validate characters |
-| `hack.rs` | Build reversed trie from TLD list, find domain hack splits |
-| `tld.rs` | Load TLD list from cache header, filter by length/prefix, sort by length+popularity |
-| `cache.rs` | Download cache from GitHub Releases, SHA-256 verify, decompress, bitmap lookup, stale-while-revalidate |
-| `dns.rs` | Cloudflare/Google DoH HTTP client, NS record query, adaptive concurrency, fallback logic |
-| `output.rs` | Format results as plain text or JSON, ANSI color handling, TTY detection |
-| `update.rs` | Check latest GitHub Release version, compare with current, print notice |
-| `error.rs` | Custom error types, Why/Where/Fix formatting |
 
 ---
 
 ## 14. Testing Strategy
 
-### 14.1 Philosophy: Test-Driven Development (TDD)
+### 14.1 Test categories
 
-This project follows a TDD workflow. For every new module or feature:
+| Category | Coverage |
+|---|---|
+| Input validation | normalization, errors, range parsing |
+| Hack detection | suffix matching and ordering |
+| Cache | bitmap indices, parsing, download/update behavior |
+| Resolver | wire-format parsing, UDP retries, timeout collapse |
+| Output | plain text and NDJSON formatting |
+| Update | GitHub release check behavior |
+| CLI | end-to-end output and exit codes |
+| Live smoke | ignored tests against public resolvers |
 
-1. **Write tests first** - Define the expected behavior as failing tests before writing any implementation code.
-2. **Minimal implementation** - Write just enough code to make the tests pass.
-3. **Refactor** - Clean up the implementation while keeping all tests green.
+### 14.2 Mock DNS strategy
 
-This applies to all layers: input validation, bitmap logic, DNS resolution, output formatting, and CLI integration. The test suite is the living specification of the system's behavior.
+Resolver integration tests use a loopback UDP mock DNS server that:
 
-### 14.2 Approach
-
-Layered test strategy: deterministic unit/integration tests for core logic, mocked HTTP tests for resolver behavior, and a small live DNS smoke suite for end-to-end confidence.
-
-### 14.3 Test Categories
-
-| Category | Description | Network Required |
-|---|---|---|
-| Input validation | Parse/validate various inputs | No |
-| Domain hack | Trie construction, suffix matching | No |
-| TLD filtering | Length filter, prefix match, sorting | No |
-| Bitmap operations | Index calculation, bit read/write | No |
-| Cache format | Serialize/deserialize, checksum verify | No |
-| Output format | Plain text, JSON, color stripping | No |
-| DNS resolution | Mocked DoH responses, fallback logic, timeout handling | No |
-| Live DNS smoke | Real DoH queries against known domains | Yes |
-| CLI end-to-end | Full pipeline from input to output (mostly fixture-based) | No |
-
-### 14.4 CI Configuration
-
-```yaml
-- name: Run fast test suite
-  run: cargo test --all-features --lib --bins --test cli --test cache --test dns --test hack --test output
-
-- name: Run live DNS smoke tests
-  run: cargo test --test live_dns_smoke -- --ignored
-```
-
-### 14.5 Test Data
-
-Use well-known domains with stable availability:
-
-```rust
-// Always registered (unavailable)
-const KNOWN_TAKEN: &[&str] = &["google.com", "github.com", "example.com"];
-
-// Known NXDOMAIN (available) - use unlikely combinations
-const KNOWN_AVAILABLE: &[&str] = &["xyzzy-test-domain-12345.com"];
-```
-
-### 14.6 Coverage Target
-
-Target high confidence rather than literal 100% coverage. Aim for >=90% line coverage on core library modules over time, measured via `cargo-tarpaulin` or `cargo-llvm-cov`. The CI gate currently excludes `src/bin/cache_builder.rs`, which is not exercised by the automated suite yet, and requires >=75% overall line coverage on the remaining code.
+- parses incoming question names
+- returns chosen `rcode` and `answer_count`
+- can deliberately drop packets to test retry behavior
 
 ---
 
 ## 15. CI/CD Pipeline
 
-### 15.1 Workflow 1: CI (Pull Request)
+### 15.1 CI workflow
 
-**Trigger:** Pull request to main, push to main
+Current CI runs:
 
-```
-Jobs:
-  1. lint:     cargo clippy --all-targets -- -D warnings
-  2. fmt:      cargo fmt --check
-  3. test:     cargo test --all-features --lib --bins --test cli --test cache --test dns --test hack --test output
-  4. smoke:    cargo test --test live_dns_smoke -- --ignored
-  5. build:    cargo build --release (verify it compiles)
-  6. coverage: cargo llvm-cov --ignore-filename-regex '(^|.*/)bin/cache_builder\.rs$' --fail-under-lines 75
-```
+1. `cargo clippy --all-targets -- -D warnings`
+2. `cargo fmt --check`
+3. `cargo test --all-features --lib --bins --test cli --test cache --test resolve --test hack --test output --test update`
+4. `cargo test --test live_dns_smoke -- --ignored`
+5. `cargo build --release`
+6. `cargo llvm-cov --ignore-filename-regex '(^|.*/)bin/cache_builder\.rs$' --fail-under-lines 75`
 
-### 15.2 Workflow 2: Release
+### 15.2 Release workflow
 
-**Trigger:** Git tag `v*`
-
-```
-Jobs:
-  1. For each target (6 targets):
-     a. Cross-compile: cargo build --release --target <target>
-     b. Strip binary
-     c. Create archive (tar.gz for unix, zip for windows)
-  2. Create GitHub Release with all archives
-  3. Publish to crates.io: cargo publish
-  4. Publish npm packages (7 platform packages + main wrapper)
-  5. Update Homebrew formula (tap repo)
-  6. Generate install.sh with new version
-```
-
-### 15.3 Workflow 3: Cache Build (Daily)
-
-**Trigger:** Daily cron (2:00 UTC), manual dispatch
-
-See section 11.3 for full workflow details.
+The release workflow builds release binaries for the configured target matrix, publishes release assets, and runs crate/npm/Homebrew publication steps.
 
 ---
 
 ## 16. Error Handling
 
-### 16.1 Error Format
+### 16.1 Common scenarios
 
-All errors follow a consistent format printed to stderr:
+| Scenario | Exit |
+|---|---|
+| invalid input | `2` |
+| `--limit 0` | `2` |
+| cache bootstrap/download failure | `2` |
+| cache checksum mismatch | `2` |
+| resolver misconfiguration | `2` |
+| no available results | `1` |
 
-```
-error: <what went wrong>
-  --> <where/context>
-  = help: <how to fix>
-```
+### 16.2 Current DNS failure policy
 
-### 16.2 Error Scenarios
+Per-domain live DNS failures do not surface as hard command errors.
 
-| Scenario | Message | Exit Code |
-|---|---|---|
-| Invalid input characters | `error: invalid character '@' in domain 'ab@c'` | 2 |
-| --limit 0 | `error: --limit must be at least 1` | 2 |
-| Empty input | `error: no domain provided` | 2 |
-| Domain too long | `error: domain too long (72 chars, max 63)` | 2 |
-| No network | `error: network request failed: connection refused` | 2 |
-| Cache download failed | `error: failed to download domain cache from GitHub Releases` | 2 |
-| Cache checksum mismatch | `error: cache integrity check failed (SHA-256 mismatch)` | 2 |
-| No available domains | stderr: `note: no available domains found for '{input}'` | 1 |
-| Partial DNS failure | Results shown, then: `note: N TLDs could not be checked (DNS timeout)` on stderr | 0 or 1 |
+Instead:
 
-### 16.3 Partial Failure
+1. retry until attempts are exhausted
+2. collapse unresolved lookups to `unavailable`
+3. continue normal output generation
 
-When some DNS queries fail during 4+ character domain checks:
-
-1. Show all successful results normally
-2. After results, print to stderr: `note: {N} of {total} TLDs could not be checked`
-3. Exit code based on available domains found (0 or 1), not on failures
+This means the CLI never emits a per-run "N TLDs could not be checked" note in the current implementation.
 
 ---
 
-## 17. Performance Targets
+## 17. Performance Notes
 
-| Metric | Target |
-|---|---|
-| 1-3 char domain (warm cache) | < 10ms |
-| 1-3 char domain (cold cache, first download, typical broadband) | < 2s |
-| 4+ char domain (all TLDs, healthy network) | typical < 5s |
-| Binary startup time | < 5ms |
-| Binary size | < 5 MB |
-| Cache file size (gzipped) | < 2 MB |
-| Memory usage | < 50 MB |
+- Warm-cache short-domain lookups are effectively instant bitmap reads.
+- 4+ character lookups are dominated by resolver RTT and resolver health.
+- The resolver avoids per-query HTTP/TLS/JSON overhead.
+- Builder throughput is network- and resolver-bound rather than CPU-bound.
+
+No benchmark number is treated as a stable contractual interface in this spec.
 
 ---
 
 ## 18. Dependencies
 
-### 18.1 Rust Crate Dependencies
+### 18.1 Core crates
 
 | Crate | Purpose |
 |---|---|
-| `clap` (derive) | CLI argument parsing |
-| `tokio` | Async runtime |
-| `reqwest` | HTTP client (DoH queries, cache download) |
-| `serde` / `serde_json` | JSON parsing (DoH responses, TLD list) |
-| `flate2` | gzip decompress (cache) |
+| `clap` | CLI parsing |
+| `tokio` | async runtime for main entrypoint and background tasks |
+| `reqwest` | cache download, update check, TLD list fetch |
+| `serde` / `serde_json` | metadata and JSON parsing |
+| `flate2` | cache gzip decompression |
 | `sha2` | SHA-256 checksum verification |
-| `dirs` | XDG/platform cache directory resolution |
-| `atty` / `is-terminal` | TTY detection for color output |
-| `anstream` / `anstyle` | ANSI color output (clap ecosystem) |
+| `dirs` | platform cache directory lookup |
+| `memmap2` | memory-map local cache file |
+| `is-terminal` | TTY detection for color |
+| `mio` | readiness polling for live UDP DNS resolver |
+| `socket2` | UDP socket creation and socket-option tuning |
+| `rand` | transaction IDs and probe names |
+| `semver` | update-version comparison |
 
-### 18.2 Minimal Dependency Philosophy
+### 18.2 Dependency split
 
-- Prefer crates already in the clap/tokio/reqwest dependency tree
-- Avoid unnecessary dependencies that increase compile time or binary size
-- No DNS wire format parsing crate needed (using JSON DoH)
-
----
-
-## Appendix A: Bitmap Cache Wire Format
-
-### Byte-level format
-
-```
-Offset  Size  Field
-0       4     Magic: "DGRP" (0x44 0x47 0x52 0x50)
-4       2     Format version: u16 LE (currently 1)
-6       8     Build timestamp: i64 LE (Unix seconds)
-14      2     TLD count: u16 LE
-16      32    SHA-256 of bitmap data only
-48      var   TLD index table: for each TLD:
-                1 byte: TLD string length
-                N bytes: TLD string (ASCII, no dot prefix)
-var     var   Bitmap data:
-                Ordered by: TLD index (0..tld_count), then domain index (0..49284)
-                Total bits: tld_count * 49284
-                Padded to byte boundary with zeros
-```
-
-### Example
-
-For TLD list `["ai", "com", "io"]` and domain "abc":
-
-```
-TLD index: ai=0, com=1, io=2
-Domain index of "abc":
-  offset = 36 (1-char) + 1296 (2-char) = 1332
-  index within 3-char group = a*(37*36) + b*36 + c
-    = 0*(37*36) + 1*36 + 2 = 38
-  domain_index = 1332 + 38 = 1370
-
-Bit position for "abc.com": 1 * 49284 + 1370 = 50654
-Byte offset: 50654 / 8 = 6331
-Bit offset:  50654 % 8 = 6
-```
-
-For domain "a-b" (3-char with hyphen):
-
-```
-domain_index:
-  offset = 1332
-  index = 0*(37*36) + 36*36 + 1 = 1297  (hyphen is char_val 36, 'b' is 1)
-  domain_index = 1332 + 1297 = 2629
-```
-
-## Appendix B: Cloudflare DoH Response Schema
-
-### Request
-
-```
-GET https://cloudflare-dns.com/dns-query?name={domain}&type=NS
-Accept: application/dns-json
-```
-
-### Response
-
-```json
-{
-  "Status": 3,          // 0=NOERROR, 3=NXDOMAIN
-  "TC": false,
-  "RD": true,
-  "RA": true,
-  "AD": false,
-  "CD": false,
-  "Question": [
-    {
-      "name": "example.com",
-      "type": 2           // NS=2
-    }
-  ],
-  "Answer": [],           // empty for NXDOMAIN
-  "Authority": []
-}
-```
-
-### Status Code Mapping
-
-| DNS Status | Code | Meaning | domaingrep Interpretation |
-|---|---|---|---|
-| NOERROR | 0 | Domain exists | unavailable |
-| FORMERR | 1 | Format error | retry/skip |
-| SERVFAIL | 2 | Server failure | retry with fallback |
-| NXDOMAIN | 3 | Domain not found | **available** |
-| NOTIMP | 4 | Not implemented | retry/skip |
-| REFUSED | 5 | Query refused | retry with fallback |
-
-## Appendix C: Supported TLD Types
-
-| Type (tld-list.com) | Include? | Reason |
-|---|---|---|
-| `ccTLD` | Yes | Country-code TLDs (.io, .ai, .co, etc.) |
-| `gTLD` | Partial | Generic TLDs, exclude brand-only TLDs |
-| `grTLD` | Yes | Generic restricted (.biz, .name, .pro) |
-| `sTLD` | Yes | Sponsored (.aero, .asia, .museum) |
-| `infrastructure` | No | .arpa only, not registrable |
-| IDN (punycode != null) | No | Non-ASCII TLDs excluded |
+- HTTP stack: cache/update/TLD source only
+- UDP resolver: custom resolver engine in `src/resolve/`
+- no DoH client
+- no external `massdns` dependency

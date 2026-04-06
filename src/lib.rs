@@ -1,21 +1,24 @@
 pub mod cache;
 pub mod cli;
-pub mod dns;
 pub mod error;
 pub mod hack;
+pub mod http;
 pub mod input;
 pub mod output;
+pub mod resolve;
 pub mod tld;
 pub mod update;
 
 use cache::{CacheConfig, CacheStore};
 use cli::Cli;
-use dns::{build_http_client, DnsResolver, DEFAULT_FALLBACK_DOH_URL, DEFAULT_PRIMARY_DOH_URL};
 use error::AppError;
 use hack::HackTrie;
+use http::build_http_client;
 use input::{parse, InputMode};
 use output::{visible_results, CheckMethod, DomainResult, OutputOptions, ResultKind};
+use resolve::{parse_resolver_list, resolve_domains, ResolveConfig};
 use std::env;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use tld::TldLenRange;
 use update::{take_if_finished, UpdateConfig};
@@ -36,8 +39,11 @@ pub struct RuntimeConfig {
     pub cache_url: String,
     pub cache_checksum_url: String,
     pub update_api_url: String,
-    pub doh_primary_url: String,
-    pub doh_fallback_url: String,
+    pub resolvers: Vec<SocketAddr>,
+    pub resolve_concurrency: usize,
+    pub resolve_timeout_ms: u64,
+    pub resolve_attempts: u8,
+    pub resolve_socket_count: usize,
     pub disable_update: bool,
 }
 
@@ -51,8 +57,6 @@ pub struct RunReport {
 #[derive(Debug, Default)]
 struct ResolutionSummary {
     results: Vec<DomainResult>,
-    dns_failures: usize,
-    dns_total: usize,
 }
 
 impl RuntimeConfig {
@@ -72,10 +76,14 @@ impl RuntimeConfig {
                 .unwrap_or_else(|_| DEFAULT_CACHE_CHECKSUM_URL.to_string()),
             update_api_url: env::var("DOMAINGREP_UPDATE_API_URL")
                 .unwrap_or_else(|_| update::DEFAULT_UPDATE_API_URL.to_string()),
-            doh_primary_url: env::var("DOMAINGREP_DOH_PRIMARY_URL")
-                .unwrap_or_else(|_| DEFAULT_PRIMARY_DOH_URL.to_string()),
-            doh_fallback_url: env::var("DOMAINGREP_DOH_FALLBACK_URL")
-                .unwrap_or_else(|_| DEFAULT_FALLBACK_DOH_URL.to_string()),
+            resolvers: match env::var("DOMAINGREP_RESOLVERS") {
+                Ok(value) => parse_resolver_list(&value)?,
+                Err(_) => ResolveConfig::default().resolvers,
+            },
+            resolve_concurrency: parse_env_usize("DOMAINGREP_RESOLVE_CONCURRENCY", 1_000)?,
+            resolve_timeout_ms: parse_env_u64("DOMAINGREP_RESOLVE_TIMEOUT_MS", 500)?,
+            resolve_attempts: parse_env_u8("DOMAINGREP_RESOLVE_ATTEMPTS", 4)?,
+            resolve_socket_count: parse_env_usize("DOMAINGREP_RESOLVE_SOCKET_COUNT", 1)?,
             disable_update: env::var("DOMAINGREP_DISABLE_UPDATE")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
@@ -94,9 +102,7 @@ pub async fn run(cli: Cli, runtime: RuntimeConfig) -> Result<RunReport, AppError
 
     let force_http2 = runtime.cache_url.starts_with("https://")
         && runtime.cache_checksum_url.starts_with("https://")
-        && runtime.update_api_url.starts_with("https://")
-        && runtime.doh_primary_url.starts_with("https://")
-        && runtime.doh_fallback_url.starts_with("https://");
+        && runtime.update_api_url.starts_with("https://");
     let client = build_http_client(force_http2)?;
 
     let update_handle = if runtime.disable_update {
@@ -123,34 +129,27 @@ pub async fn run(cli: Cli, runtime: RuntimeConfig) -> Result<RunReport, AppError
     .await?;
 
     let regular_tlds = tld::filter_tlds(cache.tlds(), input.tld_prefix.as_deref(), tld_range);
-
-    let resolver = DnsResolver::new(
-        client,
-        runtime.doh_primary_url.clone(),
-        runtime.doh_fallback_url.clone(),
-    );
+    let resolve_config = ResolveConfig {
+        resolvers: runtime.resolvers.clone(),
+        concurrency: runtime.resolve_concurrency,
+        query_timeout_ms: runtime.resolve_timeout_ms,
+        max_attempts: runtime.resolve_attempts,
+        socket_count: runtime.resolve_socket_count,
+        ..ResolveConfig::default()
+    }
+    .normalized();
 
     let mut all_results = Vec::new();
-    let mut dns_failures = 0usize;
-    let mut dns_total = 0usize;
 
     if input.mode == InputMode::SldOnly {
         let hack_tlds = tld::filter_tlds(cache.tlds(), None, tld_range);
         let trie = HackTrie::new(hack_tlds.iter().map(String::as_str));
-        let summary = resolve_hacks(&input.sld, &trie, &cache, &resolver).await?;
-        dns_failures += summary.dns_failures;
-        dns_total += summary.dns_total;
+        let summary = resolve_hacks(&input.sld, &trie, &cache, &resolve_config).await?;
         all_results.extend(summary.results);
     }
 
-    let summary = resolve_regular(&input.sld, &regular_tlds, &cache, &resolver).await?;
-    dns_failures += summary.dns_failures;
-    dns_total += summary.dns_total;
+    let summary = resolve_regular(&input.sld, &regular_tlds, &cache, &resolve_config).await?;
     all_results.extend(summary.results);
-
-    if dns_total > 0 && dns_failures == dns_total && all_results.is_empty() {
-        return Err(AppError::network_request("all DNS queries failed"));
-    }
 
     let available_count = all_results.iter().filter(|result| result.available).count();
     let limited_results = visible_results(&all_results, cli.all, cli.limit);
@@ -164,12 +163,6 @@ pub async fn run(cli: Cli, runtime: RuntimeConfig) -> Result<RunReport, AppError
     );
 
     let mut stderr = Vec::new();
-    if dns_failures > 0 {
-        stderr.push(format!(
-            "note: {dns_failures} of {dns_total} TLDs could not be checked"
-        ));
-    }
-
     if available_count == 0 {
         stderr.push(format!(
             "note: no available domains found for '{}'",
@@ -194,7 +187,7 @@ async fn resolve_hacks(
     input: &str,
     trie: &HackTrie,
     cache: &CacheStore,
-    resolver: &DnsResolver,
+    resolve_config: &ResolveConfig,
 ) -> Result<ResolutionSummary, AppError> {
     let matches = trie.find_matches(input);
     let mut summary = ResolutionSummary::default();
@@ -223,22 +216,24 @@ async fn resolve_hacks(
     }
 
     if !dns_domains.is_empty() {
-        let batch = resolver.check_domains(&dns_domains).await;
-        summary.dns_failures += batch.failures;
-        summary.dns_total += batch.total;
+        let config = resolve_config.clone();
+        let domains = dns_domains.clone();
+        let availability = tokio::task::spawn_blocking(move || resolve_domains(&config, &domains))
+            .await
+            .map_err(|err| AppError::new(format!("DNS worker task failed: {err}")))??;
 
-        for (position, entry) in dns_positions.into_iter().zip(batch.results.into_iter()) {
-            if let Ok(available) = entry.available {
-                summary.results[position] = DomainResult {
-                    domain: entry.domain,
-                    available,
-                    kind: ResultKind::Hack,
-                    method: CheckMethod::Dns,
-                };
-            }
+        for ((position, domain), available) in dns_positions
+            .into_iter()
+            .zip(dns_domains.into_iter())
+            .zip(availability.into_iter())
+        {
+            summary.results[position] = DomainResult {
+                domain,
+                available,
+                kind: ResultKind::Hack,
+                method: CheckMethod::Dns,
+            };
         }
-
-        summary.results.retain(|result| !result.domain.is_empty());
     }
 
     Ok(summary)
@@ -248,7 +243,7 @@ async fn resolve_regular(
     sld: &str,
     tlds: &[String],
     cache: &CacheStore,
-    resolver: &DnsResolver,
+    resolve_config: &ResolveConfig,
 ) -> Result<ResolutionSummary, AppError> {
     if sld.len() <= 3 {
         let results = tlds
@@ -263,36 +258,60 @@ async fn resolve_regular(
             })
             .collect::<Result<Vec<_>, AppError>>()?;
 
-        return Ok(ResolutionSummary {
-            results,
-            dns_failures: 0,
-            dns_total: 0,
-        });
+        return Ok(ResolutionSummary { results });
     }
 
     let domains = tlds
         .iter()
         .map(|tld| format!("{sld}.{tld}"))
         .collect::<Vec<_>>();
-    let batch = resolver.check_domains(&domains).await;
+    let config = resolve_config.clone();
+    let query_domains = domains.clone();
+    let availability =
+        tokio::task::spawn_blocking(move || resolve_domains(&config, &query_domains))
+            .await
+            .map_err(|err| AppError::new(format!("DNS worker task failed: {err}")))??;
 
-    let results = batch
-        .results
+    let results = domains
         .into_iter()
-        .filter_map(|entry| {
-            let available = entry.available.ok()?;
-            Some(DomainResult {
-                domain: entry.domain,
-                available,
-                kind: ResultKind::Regular,
-                method: CheckMethod::Dns,
-            })
+        .zip(availability.into_iter())
+        .map(|(domain, available)| DomainResult {
+            domain,
+            available,
+            kind: ResultKind::Regular,
+            method: CheckMethod::Dns,
         })
         .collect::<Vec<_>>();
 
-    Ok(ResolutionSummary {
-        results,
-        dns_failures: batch.failures,
-        dns_total: batch.total,
-    })
+    Ok(ResolutionSummary { results })
+}
+
+fn parse_env_usize(name: &str, default: usize) -> Result<usize, AppError> {
+    match env::var(name) {
+        Ok(value) => value.parse::<usize>().map_err(|_| {
+            AppError::new(format!("invalid value '{value}' for {name}"))
+                .with_help("use a positive integer")
+        }),
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_env_u64(name: &str, default: u64) -> Result<u64, AppError> {
+    match env::var(name) {
+        Ok(value) => value.parse::<u64>().map_err(|_| {
+            AppError::new(format!("invalid value '{value}' for {name}"))
+                .with_help("use a positive integer")
+        }),
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_env_u8(name: &str, default: u8) -> Result<u8, AppError> {
+    match env::var(name) {
+        Ok(value) => value.parse::<u8>().map_err(|_| {
+            AppError::new(format!("invalid value '{value}' for {name}"))
+                .with_help("use a positive integer between 1 and 255")
+        }),
+        Err(_) => Ok(default),
+    }
 }

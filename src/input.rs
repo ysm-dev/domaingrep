@@ -21,20 +21,20 @@ pub fn parse(input: &str) -> Result<ParsedInput, AppError> {
     }
 
     let lowered = input.to_ascii_lowercase();
-    let dot_count = lowered.chars().filter(|ch| *ch == '.').count();
-    if dot_count > 1 {
-        return Err(
-            AppError::new(format!("multi-label input '{lowered}' is not supported"))
-                .with_where(format!("'{lowered}'"))
-                .with_help("pass a single label like 'abc' or 'abc.co'"),
-        );
-    }
-
     let normalized = if lowered.ends_with('.') {
         lowered[..lowered.len() - 1].to_string()
     } else {
         lowered.clone()
     };
+
+    let dot_count = normalized.chars().filter(|ch| *ch == '.').count();
+    if dot_count > 1 {
+        return Err(
+            AppError::new(format!("multi-label input '{normalized}' is not supported"))
+                .with_where(format!("'{normalized}'"))
+                .with_help("pass a single label like 'abc' or 'abc.co'"),
+        );
+    }
 
     if normalized.is_empty() {
         return Err(AppError::no_domain());
@@ -155,5 +155,12 @@ mod tests {
     fn rejects_multi_label_input() {
         let err = parse("abc.co.uk").unwrap_err().to_string();
         assert!(err.contains("multi-label input 'abc.co.uk' is not supported"));
+    }
+
+    #[test]
+    fn trims_trailing_dot_before_counting_labels() {
+        let parsed = parse("abc.co.").unwrap();
+        assert_eq!(parsed.sld, "abc");
+        assert_eq!(parsed.tld_prefix.as_deref(), Some("co"));
     }
 }

@@ -48,11 +48,14 @@ impl AppError {
     }
 
     pub fn no_domain() -> Self {
-        Self::new("no domain provided").with_help("pass a single domain label like 'abc'")
+        Self::new("no domain provided")
+            .with_where("<DOMAIN>")
+            .with_help("pass a single domain label like 'abc'")
     }
 
     pub fn limit_must_be_at_least_one() -> Self {
         Self::new("--limit must be at least 1")
+            .with_where("'--limit 0'")
             .with_help("use a positive integer such as '--limit 10'")
     }
 

@@ -1,4 +1,4 @@
-use domaingrep::dns::build_http_client;
+use domaingrep::http::build_http_client;
 use domaingrep::update::{maybe_start, UpdateConfig};
 use std::fs;
 use tempfile::tempdir;

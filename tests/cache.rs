@@ -4,7 +4,7 @@ use common::{
     cache_fixture, cache_fixture_at, gzip_bytes, now_unix_seconds, sha256_hex, write_cache_meta,
 };
 use domaingrep::cache::{domain_to_index, CacheConfig, CacheFile, CacheStore};
-use domaingrep::dns::build_http_client;
+use domaingrep::http::build_http_client;
 use std::time::Duration;
 use tempfile::tempdir;
 use wiremock::matchers::{method, path};

@@ -14,20 +14,35 @@ pub enum ColorWhen {
     about = "Bulk domain availability search CLI tool"
 )]
 pub struct Cli {
-    #[arg(long, short = 'a')]
+    #[arg(long, short = 'a', help = "Show unavailable domains too")]
     pub all: bool,
 
-    #[arg(long, short = 'j')]
+    #[arg(long, short = 'j', help = "Output as NDJSON")]
     pub json: bool,
 
-    #[arg(long, short = 't', value_name = "RANGE")]
+    #[arg(
+        long,
+        short = 't',
+        value_name = "RANGE",
+        help = "Filter TLDs by length: 2, 2..5, ..3, 4.."
+    )]
     pub tld_len: Option<String>,
 
-    #[arg(long, short = 'l', value_name = "N")]
+    #[arg(
+        long,
+        short = 'l',
+        value_name = "N",
+        help = "Maximum rows to emit after filtering"
+    )]
     pub limit: Option<usize>,
 
-    #[arg(long, value_enum, default_value_t = ColorWhen::Auto)]
+    #[arg(long, value_enum, default_value_t = ColorWhen::Auto, help = "Color output: auto, always, never")]
     pub color: ColorWhen,
 
+    #[arg(
+        value_name = "DOMAIN",
+        required = true,
+        help = "Domain to search: 'abc' or 'abc.sh'"
+    )]
     pub domain: Option<String>,
 }

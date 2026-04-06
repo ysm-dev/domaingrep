@@ -1,8 +1,10 @@
 #[path = "../data/tld_popularity.rs"]
 mod tld_popularity;
 
-use crate::dns::DnsResolver;
 use crate::error::AppError;
+use crate::resolve::{
+    resolve_domains_raw, ResolveConfig, ResolveResponse, RCODE_NOERROR, RCODE_NXDOMAIN,
+};
 use rand::random;
 use reqwest::Client;
 use serde_json::Value;
@@ -120,7 +122,7 @@ pub fn split_groups(tlds: &[String], group_size: usize) -> Vec<Vec<String>> {
 
 pub async fn fetch_filtered_tlds(
     client: &Client,
-    resolver: &DnsResolver,
+    resolve_config: &ResolveConfig,
     source_url: &str,
 ) -> Result<Vec<String>, AppError> {
     let response = client
@@ -145,58 +147,77 @@ pub async fn fetch_filtered_tlds(
             .with_help("the TLD source did not return the expected JSON object")
     })?;
 
-    let mut included = Vec::new();
+    let candidates = object
+        .iter()
+        .filter_map(|(tld, details)| {
+            if !tld.chars().all(|ch| ch.is_ascii_lowercase()) {
+                return None;
+            }
 
-    for (tld, details) in object {
-        if !tld.chars().all(|ch| ch.is_ascii_lowercase()) {
-            continue;
-        }
+            let punycode = details.get("punycode");
+            if punycode.is_some() && !punycode.is_some_and(Value::is_null) {
+                return None;
+            }
 
-        let punycode = details.get("punycode");
-        if punycode.is_some() && !punycode.is_some_and(Value::is_null) {
-            continue;
-        }
+            let kind = details
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if kind == "infrastructure" {
+                return None;
+            }
 
-        let kind = details
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if kind == "infrastructure" {
-            continue;
-        }
+            Some(tld.clone())
+        })
+        .collect::<Vec<_>>();
 
-        if probe_public_registration(resolver, tld).await {
-            included.push(tld.clone());
-        }
-    }
+    let nic_queries = candidates
+        .iter()
+        .map(|tld| format!("nic.{tld}"))
+        .collect::<Vec<_>>();
+    let nic_results = resolve_raw_async(resolve_config.clone(), nic_queries).await?;
+
+    let active_candidates = candidates
+        .into_iter()
+        .zip(nic_results.into_iter())
+        .filter_map(|(tld, response)| match response {
+            Some(ResolveResponse {
+                rcode: RCODE_NOERROR,
+                answer_count,
+            }) if answer_count > 0 => Some(tld),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let probe_queries = active_candidates
+        .iter()
+        .map(|tld| format!("xyzzy-probe-test-{:08x}.{tld}", random::<u32>()))
+        .collect::<Vec<_>>();
+    let probe_results = resolve_raw_async(resolve_config.clone(), probe_queries).await?;
+
+    let mut included = active_candidates
+        .into_iter()
+        .zip(probe_results.into_iter())
+        .filter_map(|(tld, response)| match response {
+            Some(ResolveResponse {
+                rcode: RCODE_NXDOMAIN,
+                ..
+            }) => Some(tld),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
 
     sort_tlds(&mut included);
     Ok(included)
 }
 
-async fn probe_public_registration(resolver: &DnsResolver, tld: &str) -> bool {
-    let nic_domain = format!("nic.{tld}");
-    let Ok(nic_status) = resolver.query_status(&nic_domain).await else {
-        return false;
-    };
-
-    if nic_status.status != 0 || nic_status.answer_count == 0 {
-        return false;
-    }
-
-    let probe_domain = format!("xyzzy-probe-test-{:08x}.{tld}", random::<u32>());
-
-    for _ in 0..3 {
-        match resolver.query_status(&probe_domain).await {
-            Ok(status) if status.status == 3 => return true,
-            Ok(status) if status.status == 0 => return false,
-            Ok(status) if status.status == 2 => continue,
-            Ok(_) => return false,
-            Err(_) => return false,
-        }
-    }
-
-    false
+async fn resolve_raw_async(
+    resolve_config: ResolveConfig,
+    domains: Vec<String>,
+) -> Result<Vec<Option<ResolveResponse>>, AppError> {
+    tokio::task::spawn_blocking(move || resolve_domains_raw(&resolve_config, &domains))
+        .await
+        .map_err(|err| AppError::new(format!("DNS worker task failed: {err}")))?
 }
 
 #[cfg(test)]

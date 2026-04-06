@@ -1,6 +1,6 @@
 [package]
 name = "domaingrep"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Bulk domain availability search CLI tool"
 license = "MIT"
@@ -19,15 +19,16 @@ anstyle = "1.0.10"
 clap = { version = "4.5.26", features = ["derive"] }
 dirs = "6.0.0"
 flate2 = "1.0.35"
-futures = "0.3.31"
 is-terminal = "0.4.13"
 memmap2 = "0.9.5"
+mio = { version = "0.8.11", features = ["net", "os-poll"] }
 rand = "0.8.5"
 reqwest = { version = "0.12.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
 semver = "1.0.24"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.135"
 sha2 = "0.10.8"
+socket2 = "0.5.8"
 tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [target.'cfg(windows)'.dependencies]

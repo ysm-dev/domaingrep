@@ -4,9 +4,17 @@ use domaingrep::cache::{CacheFile, CacheMeta};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::Write;
+use std::net::{SocketAddr, UdpSocket};
 use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn cache_fixture(tlds: &[&str], available: &[(&str, &str)]) -> CacheFile {
@@ -83,4 +91,178 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MockDnsReply {
+    pub rcode: u8,
+    pub answer_count: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MockDnsAction {
+    Reply(MockDnsReply),
+    Drop,
+}
+
+impl MockDnsAction {
+    pub fn reply(rcode: u8) -> Self {
+        Self::Reply(MockDnsReply {
+            rcode,
+            answer_count: 0,
+        })
+    }
+
+    pub fn reply_with_answers(rcode: u8, answer_count: u16) -> Self {
+        Self::Reply(MockDnsReply {
+            rcode,
+            answer_count,
+        })
+    }
+
+    pub fn drop() -> Self {
+        Self::Drop
+    }
+}
+
+pub struct MockDnsServer {
+    addr: SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl MockDnsServer {
+    pub fn start<const N: usize>(entries: [(&str, Vec<MockDnsAction>); N]) -> Self {
+        Self::start_with_default(entries, MockDnsAction::Drop)
+    }
+
+    pub fn start_with_default<const N: usize>(
+        entries: [(&str, Vec<MockDnsAction>); N],
+        default_action: MockDnsAction,
+    ) -> Self {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("mock DNS socket should bind");
+        socket
+            .set_nonblocking(true)
+            .expect("mock DNS socket should be non-blocking");
+
+        let addr = socket
+            .local_addr()
+            .expect("mock DNS socket should have address");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let responses = Arc::new(Mutex::new(
+            entries
+                .into_iter()
+                .map(|(name, actions)| {
+                    (
+                        name.to_string(),
+                        actions.into_iter().collect::<VecDeque<_>>(),
+                    )
+                })
+                .collect::<HashMap<_, _>>(),
+        ));
+
+        let thread_shutdown = shutdown.clone();
+        let thread_responses = responses.clone();
+        let handle = thread::spawn(move || {
+            let mut buffer = [0u8; 512];
+
+            while !thread_shutdown.load(Ordering::Relaxed) {
+                match socket.recv_from(&mut buffer) {
+                    Ok((len, peer)) => {
+                        let Some((id, name)) = parse_query(&buffer[..len]) else {
+                            continue;
+                        };
+
+                        let action = {
+                            let mut responses = thread_responses
+                                .lock()
+                                .expect("mock DNS responses mutex should not be poisoned");
+                            match responses.get_mut(&name) {
+                                Some(queue) if queue.len() > 1 => {
+                                    queue.pop_front().unwrap_or_else(MockDnsAction::drop)
+                                }
+                                Some(queue) => {
+                                    queue.front().cloned().unwrap_or_else(MockDnsAction::drop)
+                                }
+                                None => default_action.clone(),
+                            }
+                        };
+
+                        if let MockDnsAction::Reply(reply) = action {
+                            let payload = build_response(id, reply.rcode, reply.answer_count);
+                            let _ = socket.send_to(&payload, peer);
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            addr,
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+impl Drop for MockDnsServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub fn write_resolvers_file(path: &Path, addrs: &[SocketAddr]) {
+    let contents = addrs
+        .iter()
+        .map(SocketAddr::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(path, format!("{contents}\n")).expect("resolvers file should write");
+}
+
+fn parse_query(packet: &[u8]) -> Option<(u16, String)> {
+    if packet.len() < 12 {
+        return None;
+    }
+
+    let id = u16::from_be_bytes([packet[0], packet[1]]);
+    let mut offset = 12usize;
+    let mut labels = Vec::new();
+
+    loop {
+        let len = *packet.get(offset)? as usize;
+        offset += 1;
+        if len == 0 {
+            break;
+        }
+
+        let label = std::str::from_utf8(packet.get(offset..offset + len)?).ok()?;
+        labels.push(label.to_string());
+        offset += len;
+    }
+
+    Some((id, labels.join(".")))
+}
+
+fn build_response(id: u16, rcode: u8, answer_count: u16) -> [u8; 12] {
+    let mut packet = [0u8; 12];
+    packet[..2].copy_from_slice(&id.to_be_bytes());
+    packet[2] = 0x81;
+    packet[3] = 0x80 | (rcode & 0x0f);
+    packet[4..6].copy_from_slice(&1u16.to_be_bytes());
+    packet[6..8].copy_from_slice(&answer_count.to_be_bytes());
+    packet[8..10].copy_from_slice(&0u16.to_be_bytes());
+    packet[10..12].copy_from_slice(&0u16.to_be_bytes());
+    packet
 }

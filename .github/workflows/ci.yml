@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: run fast test suite
-        run: cargo test --all-features --lib --bins --test cli --test cache --test dns --test hack --test output --test update
+        run: cargo test --all-features --lib --bins --test cli --test cache --test resolve --test hack --test output --test update
 
   smoke:
     runs-on: ubuntu-latest
