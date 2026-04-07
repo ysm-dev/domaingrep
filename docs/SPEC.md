@@ -2,7 +2,7 @@
 
 > Bulk domain availability search CLI tool.
 
-**Version:** 0.2.4
+**Version:** 0.2.5
 **Last Updated:** 2026-04-06
 
 ---

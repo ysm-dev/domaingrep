@@ -113,12 +113,16 @@ jobs:
       - name: render install script
         run: sh ./scripts/release/render_install_sh.sh "${GITHUB_REF_NAME#v}" dist/install.sh
       - name: create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            artifacts/**/archives/*.tar.gz
-            artifacts/**/archives/*.zip
-            dist/install.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          assets=(artifacts/**/archives/*.tar.gz artifacts/**/archives/*.zip dist/install.sh)
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
 
   publish-crate:
     needs: create-release

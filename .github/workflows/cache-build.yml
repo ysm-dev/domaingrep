@@ -83,10 +83,12 @@ jobs:
           git tag -f cache-latest
           git push origin refs/tags/cache-latest --force
       - name: publish cache release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: cache-latest
-          prerelease: true
-          files: |
-            cache.bin.gz
-            cache.sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create cache-latest cache.bin.gz cache.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title cache-latest \
+            --notes "Automated domain availability cache build" \
+            --prerelease
