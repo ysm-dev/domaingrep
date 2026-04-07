@@ -58,7 +58,7 @@ jobs:
             publish_archive: true
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -94,7 +94,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/archives | Out-Null
           Compress-Archive -Path "dist/raw/${{ matrix.target }}/${{ matrix.binary_name }}" -DestinationPath "dist/archives/domaingrep-${{ matrix.target }}.zip" -Force
       - name: upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-${{ matrix.target }}
           path: dist/
@@ -103,8 +103,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: render install script
@@ -123,7 +123,7 @@ jobs:
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: publish crate
         if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
@@ -152,8 +152,8 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: clone tap repository

@@ -14,7 +14,7 @@ jobs:
     outputs:
       tld-groups: ${{ steps.fetch.outputs.groups }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -26,7 +26,7 @@ jobs:
           mkdir -p staging
           cp target/ci/cache-builder staging/
       - name: upload binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binaries
           path: staging/
@@ -43,7 +43,7 @@ jobs:
       matrix:
         group: ${{ fromJSON(needs.fetch-tlds.outputs.tld-groups) }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: binaries
       - name: scan TLD group
@@ -51,7 +51,7 @@ jobs:
           chmod +x cache-builder
           ./cache-builder scan --tlds '${{ toJSON(matrix.group) }}'
       - name: upload partial bitmap
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bitmap-${{ strategy.job-index }}
           path: partial-bitmap.bin
@@ -60,12 +60,12 @@ jobs:
     needs: scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           name: binaries
       - name: download partial bitmaps
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
       - name: merge cache
         run: chmod +x cache-builder && ./cache-builder merge --output cache.bin
       - name: compress cache

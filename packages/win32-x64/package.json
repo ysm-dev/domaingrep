@@ -1,6 +1,6 @@
 {
   "name": "domaingrep-win32-x64",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Windows x64 binary for domaingrep",
   "license": "MIT",
   "repository": {

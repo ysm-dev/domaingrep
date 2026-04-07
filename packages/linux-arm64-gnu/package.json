@@ -1,6 +1,6 @@
 {
   "name": "domaingrep-linux-arm64-gnu",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Linux ARM64 glibc binary for domaingrep",
   "license": "MIT",
   "repository": {
