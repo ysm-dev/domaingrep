@@ -36,9 +36,16 @@ jobs:
       - name: fetch and filter TLDs
         id: fetch
         run: |
-          set -eo pipefail
-          GROUPS=$(./target/ci/cache-builder fetch-tlds)
-          echo "groups=$GROUPS" >> "$GITHUB_OUTPUT"
+          if ./target/ci/cache-builder fetch-tlds > tld-groups.json; then
+            echo "cache-builder succeeded, output: $(wc -c < tld-groups.json) bytes"
+            echo "groups=$(cat tld-groups.json)" >> "$GITHUB_OUTPUT"
+          else
+            RC=$?
+            echo "::error::cache-builder exited with code $RC"
+            echo "--- stdout ---"
+            cat tld-groups.json || true
+            exit $RC
+          fi
 
   scan:
     needs: fetch-tlds
