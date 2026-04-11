@@ -11,6 +11,9 @@ use serde_json::Value;
 use std::cmp::Ordering;
 
 pub const DEFAULT_TLD_SOURCE_URL: &str = "https://tld-list.com/df/tld-list-details.json";
+pub const IANA_TLD_SOURCE_URL: &str = "https://data.iana.org/TLD/tlds-alpha-by-domain.txt";
+
+const INFRASTRUCTURE_TLDS: &[&str] = &["arpa"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TldLenRange {
@@ -135,6 +138,59 @@ pub async fn fetch_filtered_tlds(
     resolve_config: &ResolveConfig,
     source_url: &str,
 ) -> Result<Vec<String>, AppError> {
+    let candidates = match fetch_candidates_from_json(client, source_url).await {
+        Ok(candidates) => candidates,
+        Err(primary_err) => {
+            eprintln!("warning: primary TLD source failed: {primary_err}");
+            eprintln!("falling back to IANA TLD list at {IANA_TLD_SOURCE_URL}");
+            fetch_candidates_from_iana(client).await?
+        }
+    };
+
+    let nic_queries = candidates
+        .iter()
+        .map(|tld| format!("nic.{tld}"))
+        .collect::<Vec<_>>();
+    let nic_results = resolve_raw_async(resolve_config.clone(), nic_queries).await?;
+
+    let active_candidates = candidates
+        .into_iter()
+        .zip(nic_results.into_iter())
+        .filter_map(|(tld, response)| match response {
+            Some(ResolveResponse {
+                rcode: RCODE_NOERROR,
+                answer_count,
+            }) if answer_count > 0 => Some(tld),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let probe_queries = active_candidates
+        .iter()
+        .map(|tld| format!("xyzzy-probe-test-{:08x}.{tld}", random::<u32>()))
+        .collect::<Vec<_>>();
+    let probe_results = resolve_raw_async(resolve_config.clone(), probe_queries).await?;
+
+    let mut included = active_candidates
+        .into_iter()
+        .zip(probe_results.into_iter())
+        .filter_map(|(tld, response)| match response {
+            Some(ResolveResponse {
+                rcode: RCODE_NXDOMAIN,
+                ..
+            }) => Some(tld),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    sort_tlds(&mut included);
+    Ok(included)
+}
+
+async fn fetch_candidates_from_json(
+    client: &Client,
+    source_url: &str,
+) -> Result<Vec<String>, AppError> {
     let response = client
         .get(source_url)
         .send()
@@ -179,46 +235,39 @@ pub async fn fetch_filtered_tlds(
 
             Some(tld.clone())
         })
-        .collect::<Vec<_>>();
+        .collect();
 
-    let nic_queries = candidates
-        .iter()
-        .map(|tld| format!("nic.{tld}"))
-        .collect::<Vec<_>>();
-    let nic_results = resolve_raw_async(resolve_config.clone(), nic_queries).await?;
+    Ok(candidates)
+}
 
-    let active_candidates = candidates
-        .into_iter()
-        .zip(nic_results.into_iter())
-        .filter_map(|(tld, response)| match response {
-            Some(ResolveResponse {
-                rcode: RCODE_NOERROR,
-                answer_count,
-            }) if answer_count > 0 => Some(tld),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+async fn fetch_candidates_from_iana(client: &Client) -> Result<Vec<String>, AppError> {
+    let response = client
+        .get(IANA_TLD_SOURCE_URL)
+        .send()
+        .await
+        .map_err(AppError::network_request)?;
 
-    let probe_queries = active_candidates
-        .iter()
-        .map(|tld| format!("xyzzy-probe-test-{:08x}.{tld}", random::<u32>()))
-        .collect::<Vec<_>>();
-    let probe_results = resolve_raw_async(resolve_config.clone(), probe_queries).await?;
+    if !response.status().is_success() {
+        return Err(AppError::network_request(format!(
+            "unexpected HTTP status {} from {IANA_TLD_SOURCE_URL}",
+            response.status()
+        )));
+    }
 
-    let mut included = active_candidates
-        .into_iter()
-        .zip(probe_results.into_iter())
-        .filter_map(|(tld, response)| match response {
-            Some(ResolveResponse {
-                rcode: RCODE_NXDOMAIN,
-                ..
-            }) => Some(tld),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let text = response
+        .text()
+        .await
+        .map_err(AppError::network_request)?;
 
-    sort_tlds(&mut included);
-    Ok(included)
+    let candidates = text
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(|line| line.trim().to_ascii_lowercase())
+        .filter(|tld| tld.chars().all(|ch| ch.is_ascii_lowercase()))
+        .filter(|tld| !INFRASTRUCTURE_TLDS.contains(&tld.as_str()))
+        .collect();
+
+    Ok(candidates)
 }
 
 async fn resolve_raw_async(

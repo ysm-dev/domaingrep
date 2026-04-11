@@ -35,7 +35,10 @@ jobs:
           path: staging/
       - name: fetch and filter TLDs
         id: fetch
-        run: echo "groups=$(./target/ci/cache-builder fetch-tlds | jq -c .)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -o pipefail
+          GROUPS=$(./target/ci/cache-builder fetch-tlds | jq -c .)
+          echo "groups=$GROUPS" >> "$GITHUB_OUTPUT"
 
   scan:
     needs: fetch-tlds
