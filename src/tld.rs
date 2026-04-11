@@ -254,10 +254,7 @@ async fn fetch_candidates_from_iana(client: &Client) -> Result<Vec<String>, AppE
         )));
     }
 
-    let text = response
-        .text()
-        .await
-        .map_err(AppError::network_request)?;
+    let text = response.text().await.map_err(AppError::network_request)?;
 
     let candidates = text
         .lines()
