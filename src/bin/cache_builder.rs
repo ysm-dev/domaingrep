@@ -7,6 +7,7 @@ use domaingrep::tld::{fetch_filtered_tlds, sort_tlds, split_groups, DEFAULT_TLD_
 use std::cmp::min;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -88,6 +89,8 @@ async fn main() {
         }
     };
 
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
     std::process::exit(exit_code);
 }
 
@@ -114,7 +117,7 @@ async fn run(cli: CacheBuilderCli) -> Result<(), AppError> {
                 &fetch_filtered_tlds(&client, &resolve_config, &source_url).await?,
                 group_size,
             );
-            let output = serde_json::to_string_pretty(&groups)
+            let output = serde_json::to_string(&groups)
                 .map_err(|err| AppError::io("failed to serialize TLD groups", err))?;
             println!("{output}");
             Ok(())
