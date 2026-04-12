@@ -36,8 +36,8 @@ jobs:
       - name: fetch and filter TLDs
         id: fetch
         run: |
-          GROUPS=$(./target/ci/cache-builder fetch-tlds)
-          echo "groups=$GROUPS" >> "$GITHUB_OUTPUT"
+          ./target/ci/cache-builder fetch-tlds > tld-groups.json
+          echo "groups=$(cat tld-groups.json)" >> "$GITHUB_OUTPUT"
 
   scan:
     needs: fetch-tlds
