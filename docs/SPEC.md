@@ -2,8 +2,8 @@
 
 > Bulk domain availability search CLI tool.
 
-**Version:** 0.2.5
-**Last Updated:** 2026-04-06
+**Version:** 0.2.6
+**Last Updated:** 2026-04-14
 
 ---
 
@@ -287,16 +287,29 @@ Matches: bun.sh
 
 ### 6.1 Source
 
-- HTTP source: `https://tld-list.com/df/tld-list-details.json`
+- IANA delegated TLD list: `https://data.iana.org/TLD/tlds-alpha-by-domain.txt`
+- ICANN registry agreements CSV: `https://www.icann.org/en/registry-agreements/csvdownload`
 
 ### 6.2 Filtering rules
 
 TLDs are included only if all of the following hold:
 
-1. ASCII lowercase key only
-2. `punycode` is `null`
-3. `type != "infrastructure"`
-4. Public registration probe passes
+1. ASCII lowercase entry from the IANA delegated-TLD list
+2. Not an infrastructure TLD (`arpa`)
+3. Not a restricted TLD (`edu`, `gov`, `int`, `mil`, `va`)
+4. Not marked as `Brand (Spec 13)` in the ICANN registry agreements CSV
+5. Not marked non-`active` in the ICANN registry agreements CSV
+6. Public registration probe passes
+
+Rows missing from the ICANN registry agreements CSV are not excluded by that step.
+
+The restricted TLD list contains:
+
+- `edu`, `gov`, `int`, `mil`: IANA-sponsored TLDs without an ICANN registry
+  agreement (cross-reference of IANA Root Zone Database `type == "sponsored"`
+  with the ICANN registry agreements CSV).
+- `va`: reserved exclusively for the Holy See; not available through any public
+  registrar.
 
 ### 6.3 Public registration probe
 
@@ -577,10 +590,11 @@ cache-builder merge --output <PATH>
 
 Responsibilities:
 
-1. fetch TLD JSON from the source URL
-2. probe public registrability using the shared resolver engine
-3. sort and split TLDs into groups
-4. print JSON matrix output for GitHub Actions
+1. fetch the IANA delegated TLD list
+2. fetch the ICANN registry agreements CSV and exclude brand/non-active gTLDs
+3. probe public registrability using the shared resolver engine
+4. sort and split TLDs into groups
+5. print JSON matrix output for GitHub Actions
 
 ### 11.3 `scan`
 

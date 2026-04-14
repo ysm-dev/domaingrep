@@ -1,6 +1,6 @@
 {
   "name": "domaingrep-linux-x64-gnu",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Linux x64 glibc binary for domaingrep",
   "license": "MIT",
   "repository": {
