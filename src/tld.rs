@@ -7,7 +7,7 @@ use crate::resolve::{
 };
 use csv::{ReaderBuilder, StringRecord, Trim};
 use rand::random;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -15,6 +15,8 @@ use std::time::Duration;
 pub const IANA_TLD_SOURCE_URL: &str = "https://data.iana.org/TLD/tlds-alpha-by-domain.txt";
 pub const ICANN_REGISTRY_AGREEMENTS_URL: &str =
     "https://www.icann.org/en/registry-agreements/csvdownload";
+pub const ICANN_REGISTRY_AGREEMENTS_FALLBACK_URL: &str =
+    "https://raw.githubusercontent.com/case/iana-data/main/data/source/icann-registry-agreement-table.csv";
 pub const DEFAULT_TLD_SOURCE_URL: &str = IANA_TLD_SOURCE_URL;
 
 const INFRASTRUCTURE_TLDS: &[&str] = &["arpa"];
@@ -31,6 +33,8 @@ const RESTRICTED_TLDS: &[&str] = &["edu", "gov", "int", "mil", "va"];
 
 const ICANN_ACTIVE_STATUS: &str = "active";
 const ICANN_BRAND_AGREEMENT_TYPE: &str = "brand (spec 13)";
+const HTTP_FETCH_ATTEMPTS: usize = 4;
+const HTTP_FETCH_RETRY_BASE_DELAY_MS: u64 = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TldLenRange {
@@ -206,40 +210,100 @@ async fn fetch_candidates_from_iana(
     client: &Client,
     source_url: &str,
 ) -> Result<Vec<String>, AppError> {
-    let response = client
-        .get(source_url)
-        .send()
-        .await
-        .map_err(AppError::network_request)?;
-
-    if !response.status().is_success() {
-        return Err(AppError::network_request(format!(
-            "unexpected HTTP status {} from {source_url}",
-            response.status()
-        )));
-    }
-
-    let text = response.text().await.map_err(AppError::network_request)?;
+    let text = fetch_text_with_retry(client, source_url, None).await?;
     parse_iana_candidates(&text)
 }
 
 async fn fetch_icann_excluded_tlds(client: &Client) -> Result<HashSet<String>, AppError> {
-    let response = client
-        .get(ICANN_REGISTRY_AGREEMENTS_URL)
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(AppError::network_request)?;
+    fetch_icann_excluded_tlds_with_sources(
+        client,
+        ICANN_REGISTRY_AGREEMENTS_URL,
+        ICANN_REGISTRY_AGREEMENTS_FALLBACK_URL,
+    )
+    .await
+}
 
-    if !response.status().is_success() {
-        return Err(AppError::network_request(format!(
-            "unexpected HTTP status {} from {ICANN_REGISTRY_AGREEMENTS_URL}",
-            response.status()
-        )));
+async fn fetch_icann_excluded_tlds_with_sources(
+    client: &Client,
+    primary_url: &str,
+    fallback_url: &str,
+) -> Result<HashSet<String>, AppError> {
+    let text = match fetch_text_with_retry(client, primary_url, Some(Duration::from_secs(30))).await
+    {
+        Ok(text) => text,
+        Err(primary_err) => {
+            eprintln!(
+                "warning: primary ICANN registry agreements source failed; falling back to mirror"
+            );
+            eprintln!("  --> {primary_url}");
+            eprintln!("  --> {fallback_url}");
+            eprintln!("  = detail: {}", primary_err.to_string().trim_end());
+            fetch_text_with_retry(client, fallback_url, Some(Duration::from_secs(30))).await?
+        }
+    };
+
+    parse_icann_excluded_tlds(&text)
+}
+
+async fn fetch_text_with_retry(
+    client: &Client,
+    url: &str,
+    timeout: Option<Duration>,
+) -> Result<String, AppError> {
+    let mut last_error = None;
+
+    for attempt in 0..HTTP_FETCH_ATTEMPTS {
+        let request = client.get(url);
+        let request = if let Some(timeout) = timeout {
+            request.timeout(timeout)
+        } else {
+            request
+        };
+
+        match request.send().await {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    return response.text().await.map_err(AppError::network_request);
+                }
+
+                let message = format!("unexpected HTTP status {status} from {url}");
+                if !is_retryable_status(status) || attempt + 1 == HTTP_FETCH_ATTEMPTS {
+                    return Err(AppError::network_request(message));
+                }
+
+                last_error = Some(message);
+            }
+            Err(err) => {
+                if attempt + 1 == HTTP_FETCH_ATTEMPTS {
+                    return Err(AppError::network_request(err));
+                }
+
+                last_error = Some(err.to_string());
+            }
+        }
+
+        if let Some(last_error) = &last_error {
+            eprintln!(
+                "warning: request attempt {}/{} failed for {url}: {last_error}",
+                attempt + 1,
+                HTTP_FETCH_ATTEMPTS
+            );
+        }
+        tokio::time::sleep(http_fetch_retry_delay(attempt)).await;
     }
 
-    let text = response.text().await.map_err(AppError::network_request)?;
-    parse_icann_excluded_tlds(&text)
+    Err(AppError::network_request(
+        last_error.unwrap_or_else(|| format!("request to {url} failed")),
+    ))
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
+}
+
+fn http_fetch_retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis(HTTP_FETCH_RETRY_BASE_DELAY_MS * (1_u64 << attempt))
 }
 
 fn parse_iana_candidates(text: &str) -> Result<Vec<String>, AppError> {
@@ -334,10 +398,33 @@ async fn resolve_raw_async(
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_tlds, is_pinned, parse_iana_candidates, parse_icann_excluded_tlds, pinned_index,
-        TldLenRange,
+        fetch_icann_excluded_tlds_with_sources, fetch_text_with_retry, filter_tlds, is_pinned,
+        parse_iana_candidates, parse_icann_excluded_tlds, pinned_index, TldLenRange,
     };
+    use crate::http::build_http_client_with_timeouts;
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    struct FlakyResponder {
+        failures_before_success: usize,
+        attempts: Arc<AtomicUsize>,
+        success_body: &'static str,
+    }
+
+    impl Respond for FlakyResponder {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            let attempt = self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
+            if attempt < self.failures_before_success {
+                ResponseTemplate::new(500)
+            } else {
+                ResponseTemplate::new(200).set_body_string(self.success_body)
+            }
+        }
+    }
 
     #[test]
     fn parses_supported_length_ranges() {
@@ -419,6 +506,70 @@ mod tests {
                 "doosan".to_string(),
             ])
         );
+        assert!(!excluded.contains("com"));
+    }
+
+    #[tokio::test]
+    async fn retries_transient_server_errors_when_fetching_text() {
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        Mock::given(method("GET"))
+            .and(path("/icann.csv"))
+            .respond_with(FlakyResponder {
+                failures_before_success: 2,
+                attempts: attempts.clone(),
+                success_body: "ok",
+            })
+            .mount(&server)
+            .await;
+
+        let client =
+            build_http_client_with_timeouts(false, Duration::from_secs(1), Duration::from_secs(2))
+                .unwrap();
+
+        let body = fetch_text_with_retry(&client, &format!("{}/icann.csv", server.uri()), None)
+            .await
+            .unwrap();
+
+        assert_eq!(body, "ok");
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_mirrored_icann_csv_when_primary_fails() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/primary.csv"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let csv = concat!(
+            "\u{feff}\"Top Level Domain\",\"Agreement Type\",\"Agreement Status\"\n",
+            "\"google\",\"Base, Brand (Spec 13), Non-Sponsored\",\"active\"\n",
+            "\"com\",\"Base, Non-Sponsored\",\"active\"\n",
+        );
+        Mock::given(method("GET"))
+            .and(path("/fallback.csv"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(csv))
+            .mount(&server)
+            .await;
+
+        let client =
+            build_http_client_with_timeouts(false, Duration::from_secs(1), Duration::from_secs(2))
+                .unwrap();
+
+        let excluded = fetch_icann_excluded_tlds_with_sources(
+            &client,
+            &format!("{}/primary.csv", server.uri()),
+            &format!("{}/fallback.csv", server.uri()),
+        )
+        .await
+        .unwrap();
+
+        assert!(excluded.contains("google"));
         assert!(!excluded.contains("com"));
     }
 }
