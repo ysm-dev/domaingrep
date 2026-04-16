@@ -19,16 +19,21 @@ One keyword. Every TLD. Results in under a second.
 
 ## Install
 
+Run instantly without installing:
+
 ```sh
-curl -fsSL https://domaingrep.dev/install.sh | sh
+npx domaingrep abc
+bunx domaingrep abc
 ```
 
-Also available via:
+Or install globally:
 
 ```sh
-brew install ysm-dev/tap/domaingrep   # Homebrew
-cargo install domaingrep               # Cargo
-npx domaingrep abc                     # npm (no install)
+curl -fsSL https://domaingrep.dev/install.sh | sh   # Shell (macOS / Linux)
+brew install ysm-dev/tap/domaingrep                 # Homebrew
+cargo install domaingrep                            # Cargo
+npm  install -g domaingrep                          # npm
+bun  install -g domaingrep                          # Bun
 ```
 
 ## Usage
